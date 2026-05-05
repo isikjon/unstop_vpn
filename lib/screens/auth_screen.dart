@@ -1,774 +1,568 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../config/app_config.dart';
+
 import '../providers/auth_provider.dart';
+import '../providers/trial_provider.dart';
+import '../screens/main_shell.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
-import '../widgets/logo_widget.dart';
+import '../widgets/inset_shadow.dart';
 
-/// Telegram auth screen.
-///
-/// Step 1 — Phone entry + open bot
-/// Step 2 — Share contact in bot → app checks if bot received it.
-///          If yes → auth done (no code needed!).
-///          If no  → fallback to code verification (step 3).
-/// Step 3 — (Fallback) Code entry via @VerificationCodes.
 class AuthScreen extends ConsumerStatefulWidget {
-  const AuthScreen({super.key});
+  final bool showBottomNav;
+
+  const AuthScreen({super.key, this.showBottomNav = true});
 
   @override
   ConsumerState<AuthScreen> createState() => _AuthScreenState();
 }
 
 class _AuthScreenState extends ConsumerState<AuthScreen> {
-  final _phoneCtrl = TextEditingController();
-  final _codeCtrl = TextEditingController();
-  final _phoneFocus = FocusNode();
-  final _codeFocus = FocusNode();
+  static const _authAssets = 'assets/auth';
+  static const _bottomBarAssets = 'assets/icons/bottom_bar';
 
-  int _uiStep = 0; // 0=phone, 1=bot prompt, 2=code
+  Timer? _authPollTimer;
 
+  int _uiStep = 0; // 0=start, 1=waiting for Telegram bot auth
   bool _busy = false;
   String? _error;
-  String? _deliveryInfo;
+  String? _authKey;
+  String? _botLink;
 
   @override
   void dispose() {
-    _phoneCtrl.dispose();
-    _codeCtrl.dispose();
-    _phoneFocus.dispose();
-    _codeFocus.dispose();
+    _authPollTimer?.cancel();
     super.dispose();
   }
 
-  // ── helpers ────────────────────────────────────────────────────────────────
-
-  String get _normalizedPhone {
-    final raw = _phoneCtrl.text.trim().replaceAll(RegExp(r'[\s\-\(\)]'), '');
-    if (raw.startsWith('+')) return raw;
-    if (raw.startsWith('8')) return '+7${raw.substring(1)}';
-    if (raw.startsWith('7')) return '+$raw';
-    if (raw.isNotEmpty) return '+$raw';
-    return raw;
+  Future<void> _openBot() async {
+    if (_botLink == null || _botLink!.isEmpty) {
+      await _startBotAuth();
+      return;
+    }
+    await _launchBotAuthLink(_botLink!);
   }
 
   void _setError(String msg) => setState(() {
     _error = msg;
     _busy = false;
   });
+
   void _clearError() => setState(() => _error = null);
 
-  // ── Step 1: phone submitted ────────────────────────────────────────────────
-
-  Future<void> _onPhoneNext() async {
-    final phone = _normalizedPhone;
-    if (phone.length < 7) {
-      _setError('Введите корректный номер телефона');
-      return;
-    }
+  Future<void> _startBotAuth() async {
     _clearError();
-    await ref.read(authProvider.notifier).phoneSubmitted(phone);
-    setState(() => _uiStep = 1);
+    setState(() => _busy = true);
 
-    // Open bot deep-link so user can share contact.
-    final uri = Uri.parse(AppConfig.botDeepLink);
     try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (_) {
+      final result = await AuthService.startBotAuth();
+      setState(() {
+        _authKey = result.key;
+        _botLink = result.botLink;
+        _uiStep = 1;
+        _busy = false;
+      });
+      _startAuthPolling();
+      await _launchBotAuthLink(result.botLink);
+    } on AuthException catch (e) {
+      _setError(e.message);
+    } catch (e) {
       _setError('Не удалось открыть Telegram');
     }
   }
 
-  // ── Step 2: user confirms they shared contact ─────────────────────────────
-
-  Future<void> _onContactShared() async {
-    _clearError();
-    setState(() {
-      _busy = true;
+  void _startAuthPolling() {
+    _authPollTimer?.cancel();
+    _authPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _checkBotAuth(silent: true);
     });
-
-    final phone = ref.read(authProvider).phone ?? _normalizedPhone;
-
-    // Primary path: check if bot already got the contact (instant, no code)
-    try {
-      final telegramId = await AuthService.checkContact(phone);
-      if (telegramId != null) {
-        await ref.read(authProvider.notifier).setVerifiedId(telegramId);
-        if (!mounted) return;
-        Navigator.of(context).pushReplacementNamed('/home');
-        return;
-      }
-    } catch (_) {}
-
-    // Fallback: bot hasn't received contact yet, or check failed.
-    // Try sending a verification code as backup.
-    try {
-      final result = await AuthService.sendCode(phone);
-      ref.read(authProvider.notifier).contactShared();
-      setState(() {
-        _uiStep = 2;
-        _busy = false;
-        _deliveryInfo = result.delivery;
-      });
-      Future.delayed(const Duration(milliseconds: 200), () {
-        if (mounted) _codeFocus.requestFocus();
-      });
-    } on AuthException catch (e) {
-      _setError('Контакт ещё не получен ботом. ${e.message}');
-    } catch (e) {
-      _setError(
-        'Контакт не найден. Убедитесь, что вы поделились контактом в боте.',
-      );
-    }
   }
 
-  /// Poll for contact: try check-contact again without code flow
-  Future<void> _onRetryContactCheck() async {
-    _clearError();
-    setState(() {
-      _busy = true;
-    });
-    final phone = ref.read(authProvider).phone ?? _normalizedPhone;
-
-    try {
-      final telegramId = await AuthService.checkContact(phone);
-      if (telegramId != null) {
-        await ref.read(authProvider.notifier).setVerifiedId(telegramId);
-        if (!mounted) return;
-        Navigator.of(context).pushReplacementNamed('/home');
-        return;
-      }
-    } catch (_) {}
-
-    _setError(
-      'Контакт ещё не получен. Вернитесь в бот и поделитесь контактом.',
-    );
+  Future<void> _onBotAuthConfirmed() async {
+    await _checkBotAuth(silent: false);
   }
 
-  Future<void> _onResendCode() async {
-    _clearError();
-    setState(() {
-      _busy = true;
-    });
-    final phone = ref.read(authProvider).phone ?? _normalizedPhone;
-    try {
-      final result = await AuthService.sendCode(phone);
-      setState(() {
-        _busy = false;
-        _deliveryInfo = result.delivery;
-      });
-    } on AuthException catch (e) {
-      _setError(e.message);
-    } catch (e) {
-      _setError('Ошибка: $e');
-    }
-  }
-
-  // ── Step 3 (fallback): verify code ────────────────────────────────────────
-
-  Future<void> _onVerifyCode() async {
-    final code = _codeCtrl.text.trim();
-    if (code.length < 5) {
-      _setError('Введите 5-значный код');
+  Future<void> _checkBotAuth({required bool silent}) async {
+    final key = _authKey;
+    if (key == null || key.isEmpty) {
+      if (!silent) await _startBotAuth();
       return;
     }
-    _clearError();
-    setState(() => _busy = true);
-    ref.read(authProvider.notifier).setVerifying();
 
-    final phone = ref.read(authProvider).phone ?? _normalizedPhone;
+    if (!silent) {
+      _clearError();
+      setState(() => _busy = true);
+    }
+
     try {
-      final telegramId = await AuthService.verifyCode(phone, code);
-      await ref.read(authProvider.notifier).setVerifiedId(telegramId);
-      if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed('/home');
+      final result = await AuthService.checkBotAuth(key);
+      if (result.authenticated && result.telegramId != null) {
+        _authPollTimer?.cancel();
+        await ref
+            .read(authProvider.notifier)
+            .setVerifiedId(result.telegramId!, name: result.name);
+        if (!mounted) return;
+        Navigator.of(context).pushReplacementNamed('/home');
+        return;
+      }
+      if (!silent) {
+        final suffix = _authKey == null ? '' : '\nКлюч: key_$_authKey';
+        _setError(
+          'Авторизация ещё не подтверждена. Нажмите Start/Подтвердить в боте.$suffix',
+        );
+      }
     } on AuthException catch (e) {
-      ref.read(authProvider.notifier).reset();
-      _setError(e.message);
-      setState(() => _uiStep = 2); // stay on code step
-    } catch (e) {
-      _setError('Ошибка: $e');
+      if (!silent) _setError(e.message);
+    } finally {
+      if (!silent && mounted && _busy) {
+        setState(() => _busy = false);
+      }
     }
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────
+  Future<void> _launchBotAuthLink(String botLink) async {
+    final httpsUri = Uri.parse(botLink);
+    final domain = httpsUri.pathSegments.isNotEmpty
+        ? httpsUri.pathSegments.first
+        : httpsUri.host;
+    final start = httpsUri.queryParameters['start'];
+
+    if (domain.isNotEmpty && start != null && start.isNotEmpty) {
+      final tgUri = Uri(
+        scheme: 'tg',
+        host: 'resolve',
+        queryParameters: {'domain': domain, 'start': start},
+      );
+      try {
+        final opened = await launchUrl(
+          tgUri,
+          mode: LaunchMode.externalApplication,
+        );
+        if (opened) return;
+      } catch (_) {}
+    }
+
+    await launchUrl(httpsUri, mode: LaunchMode.externalApplication);
+  }
+
+  void _openMainTab(int index) {
+    _authPollTimer?.cancel();
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => MainShell(initialIndex: index)),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+    final bottomGap = widget.showBottomNav ? 92.0 + 18.0 : 18.0;
+
     return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: Container(
-        decoration: const BoxDecoration(gradient: AppColors.gradientBg),
-        child: SafeArea(
-          child: GestureDetector(
-            onTap: () => FocusScope.of(context).unfocus(),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      resizeToAvoidBottomInset: false,
+      backgroundColor: const Color(0xFF000214),
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: Stack(
+          children: [
+            const Positioned.fill(child: ColoredBox(color: Color(0xFF000214))),
+            Positioned.fill(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return Align(
+                    alignment: Alignment.topCenter,
+                    child: SizedBox(
+                      width: constraints.maxWidth * 0.84,
+                      child: Image.asset(
+                        '$_authAssets/auth_screen_bg.png',
+                        fit: BoxFit.fitWidth,
+                        alignment: Alignment.topCenter,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            SafeArea(
+              bottom: false,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const SizedBox(height: 12),
-                  _buildLogo(),
-                  const SizedBox(height: 28),
-                  _buildStepIndicator(),
-                  const SizedBox(height: 32),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 350),
-                    switchInCurve: Curves.easeOut,
-                    switchOutCurve: Curves.easeIn,
-                    transitionBuilder: (child, anim) => FadeTransition(
-                      opacity: anim,
-                      child: SlideTransition(
-                        position: Tween<Offset>(
-                          begin: const Offset(0.08, 0),
-                          end: Offset.zero,
-                        ).animate(anim),
-                        child: child,
-                      ),
-                    ),
-                    child: _uiStep == 0
-                        ? _buildPhoneStep()
-                        : _uiStep == 1
-                        ? _buildBotStep()
-                        : _buildCodeStep(),
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 16),
-                    _buildError(_error!),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLogo() {
-    return Column(
-      children: [
-        const LogoWidget(size: 72).animate().scale(
-          begin: const Offset(0.7, 0.7),
-          duration: 500.ms,
-          curve: Curves.easeOutBack,
-        ),
-        const SizedBox(height: 16),
-        ShaderMask(
-          shaderCallback: (b) => AppColors.gradientPrimary.createShader(b),
-          child: Text(
-            'Войти в UNSTOP VPN',
-            textAlign: TextAlign.center,
-            style: GoogleFonts.manrope(
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
-              color: Colors.white,
-            ),
-          ),
-        ).animate().fadeIn(delay: 100.ms),
-      ],
-    );
-  }
-
-  Widget _buildStepIndicator() {
-    const labels = ['Номер', 'Бот', 'Код'];
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(3, (i) {
-        final active = i == _uiStep;
-        final done = i < _uiStep;
-        return Row(
-          children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              width: active ? 32 : 24,
-              height: 24,
-              decoration: BoxDecoration(
-                color: done
-                    ? AppColors.success.withValues(alpha: 0.2)
-                    : (active
-                          ? AppColors.primary.withValues(alpha: 0.15)
-                          : Colors.transparent),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: done
-                      ? AppColors.success
-                      : (active ? AppColors.primary : AppColors.border),
-                  width: 1.5,
-                ),
-              ),
-              child: Center(
-                child: done
-                    ? const Icon(
-                        Icons.check,
-                        size: 12,
-                        color: AppColors.success,
-                      )
-                    : Text(
-                        '${i + 1}',
-                        style: GoogleFonts.manrope(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: active
-                              ? AppColors.primary
-                              : AppColors.textHint,
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(width: 4),
-            Text(
-              labels[i],
-              style: GoogleFonts.manrope(
-                fontSize: 11,
-                color: active
-                    ? AppColors.primary
-                    : (done ? AppColors.success : AppColors.textHint),
-                fontWeight: active ? FontWeight.w700 : FontWeight.w400,
-              ),
-            ),
-            if (i < 2) ...[
-              const SizedBox(width: 8),
-              Container(
-                width: 20,
-                height: 1,
-                color: i < _uiStep ? AppColors.success : AppColors.border,
-              ),
-              const SizedBox(width: 8),
-            ],
-          ],
-        );
-      }),
-    );
-  }
-
-  // ── Step panels ────────────────────────────────────────────────────────────
-
-  Widget _buildPhoneStep() {
-    return Column(
-      key: const ValueKey('phone'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _sectionTitle(
-          'Введите номер телефона',
-          'Тот же номер, который привязан к вашему Telegram аккаунту',
-        ),
-        const SizedBox(height: 20),
-        _phoneField(),
-        const SizedBox(height: 20),
-        _primaryButton(
-          icon: Icons.telegram_rounded,
-          label: 'Перейти в бот',
-          loading: _busy,
-          onTap: _onPhoneNext,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildBotStep() {
-    return Column(
-      key: const ValueKey('bot'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _sectionTitle(
-          'Поделитесь контактом в боте',
-          'В открывшемся боте нажмите кнопку «Поделиться контактом», '
-              'затем вернитесь сюда и нажмите кнопку ниже.',
-        ),
-        const SizedBox(height: 24),
-        // Visual hint card
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            color: AppColors.bgCard,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AppColors.border),
-          ),
-          child: Column(
-            children: [
-              Row(
-                children: [
+                  const SizedBox(height: 16),
+                  _header(),
+                  const Spacer(),
                   Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF229ED9).withValues(alpha: 0.15),
-                      shape: BoxShape.circle,
+                    width: double.infinity,
+                    padding: EdgeInsets.only(
+                      top: 24,
+                      bottom: keyboard > 0 ? keyboard + 18 : bottomGap,
                     ),
-                    child: const Icon(
-                      Icons.telegram_rounded,
-                      color: Color(0xFF229ED9),
-                      size: 24,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF000214),
+                      border: Border(
+                        top: BorderSide(color: Color(0xFF0F1628), width: 1),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      '@${AppConfig.botUsername}',
-                      style: GoogleFonts.manrope(
-                        fontSize: 15,
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.w700,
+                    child: AnimatedPadding(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOut,
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        switchInCurve: Curves.easeOut,
+                        switchOutCurve: Curves.easeIn,
+                        child: _buildCurrentStep(),
                       ),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
-              _hintRow(
-                Icons.touch_app_rounded,
-                'Откройте бота (уже должен открыться)',
-              ),
-              const SizedBox(height: 10),
-              _hintRow(
-                Icons.contacts_rounded,
-                'Нажмите «Поделиться контактом»',
-              ),
-              const SizedBox(height: 10),
-              _hintRow(
-                Icons.check_circle_rounded,
-                'Вернитесь в приложение и нажмите «Я поделился контактом»',
-              ),
-            ],
-          ),
+            ),
+            if (widget.showBottomNav)
+              Positioned(left: 0, right: 0, bottom: 0, child: _bottomNav()),
+          ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildCurrentStep() {
+    if (_uiStep == 0) return _startStep();
+    return _botStep();
+  }
+
+  Widget _header() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Row(
+        children: [
+          Image.asset('assets/images/logo.png', height: 24),
+          const Spacer(),
+          _trialBadge(),
+        ],
+      ),
+    );
+  }
+
+  Widget _trialBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F1628),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: RichText(
+        text: TextSpan(
+          style: GoogleFonts.manrope(
+            color: const Color(0xFF628499),
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+          children: [
+            const TextSpan(text: 'ПРОБНЫЙ ПЕРИОД: '),
+            TextSpan(
+              text: _formatDuration(ref.watch(trialProvider).timeLeft),
+              style: const TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _startStep() {
+    return Column(
+      key: const ValueKey('auth-start-step'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _authTitle(),
         const SizedBox(height: 8),
-        TextButton.icon(
-          onPressed: () async {
-            final uri = Uri.parse(AppConfig.botDeepLink);
-            await launchUrl(uri, mode: LaunchMode.externalApplication);
-          },
-          icon: const Icon(
-            Icons.open_in_new_rounded,
-            size: 16,
-            color: AppColors.primary,
-          ),
-          label: Text(
-            'Открыть бот снова',
-            style: GoogleFonts.manrope(fontSize: 13, color: AppColors.primary),
-          ),
+        _paragraph(
+          'Нажмите кнопку ниже, откройте Telegram-бота\nи подтвердите вход в UNSTOP VPN.',
         ),
-        const SizedBox(height: 16),
-        _primaryButton(
-          icon: Icons.check_circle_outline_rounded,
-          label: 'Я поделился контактом',
-          loading: _busy,
-          onTap: _onContactShared,
-        ),
-        const SizedBox(height: 12),
-        _secondaryButton(
-          label: 'Назад',
-          onTap: () => setState(() {
-            _uiStep = 0;
-            _error = null;
-          }),
-        ),
+        if (_error != null) ...[const SizedBox(height: 10), _errorText()],
+        const SizedBox(height: 28),
+        _primaryButton(label: 'Авторизоваться', onTap: _startBotAuth),
       ],
     );
   }
 
-  Widget _buildCodeStep() {
-    final subtitle = _deliveryInfo != null && _deliveryInfo!.isNotEmpty
-        ? 'Код отправлен: $_deliveryInfo'
-        : 'Код пришёл в Telegram (бот @VerificationCodes или СМС)';
+  Widget _botStep() {
     return Column(
-      key: const ValueKey('code'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      key: const ValueKey('bot-step'),
+      mainAxisSize: MainAxisSize.min,
       children: [
-        _sectionTitle('Введите код из Telegram', subtitle),
-        const SizedBox(height: 20),
-        _codeField(),
+        _authTitle(),
         const SizedBox(height: 8),
+        _botDescription(),
+        if (_error != null) ...[const SizedBox(height: 10), _errorText()],
+        const SizedBox(height: 28),
+        _primaryButton(
+          label: 'Я авторизовался',
+          iconPath: '$_authAssets/check.svg',
+          onTap: _onBotAuthConfirmed,
+        ),
+        const SizedBox(height: 10),
         Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            TextButton.icon(
-              onPressed: _busy ? null : _onResendCode,
-              icon: const Icon(
-                Icons.refresh_rounded,
-                size: 14,
-                color: AppColors.primary,
-              ),
-              label: Text(
-                'Новый код',
-                style: GoogleFonts.manrope(
-                  fontSize: 12,
-                  color: AppColors.primary,
-                ),
-              ),
+            _squareButton(
+              iconPath: '$_authAssets/arrow-left.svg',
+              onTap: () => setState(() {
+                _uiStep = 0;
+                _error = null;
+                _authPollTimer?.cancel();
+              }),
             ),
-            TextButton.icon(
-              onPressed: _busy ? null : _onRetryContactCheck,
-              icon: const Icon(
-                Icons.contacts_rounded,
-                size: 14,
-                color: AppColors.success,
-              ),
-              label: Text(
-                'Проверить контакт',
-                style: GoogleFonts.manrope(
-                  fontSize: 12,
-                  color: AppColors.success,
-                ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _darkButton(
+                label: 'Открыть бота',
+                iconPath: '$_authAssets/open-link.svg',
+                onTap: _busy ? null : _openBot,
               ),
             ),
           ],
         ),
-        const SizedBox(height: 12),
-        _primaryButton(
-          icon: Icons.verified_rounded,
-          label: 'Подтвердить код',
-          loading: _busy,
-          onTap: _onVerifyCode,
-        ),
-        const SizedBox(height: 12),
-        _secondaryButton(
-          label: 'Назад',
-          onTap: () => setState(() {
-            _uiStep = 1;
-            _error = null;
-            _codeCtrl.clear();
-            _deliveryInfo = null;
-          }),
-        ),
       ],
     );
   }
 
-  // ── UI atoms ────────────────────────────────────────────────────────────────
-
-  Widget _sectionTitle(String title, String subtitle) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: GoogleFonts.manrope(
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-            color: AppColors.textPrimary,
-          ),
+  Widget _authTitle({String text = 'Авторизация\nв UNSTOP VPN'}) {
+    return ShaderMask(
+      shaderCallback: (bounds) => const LinearGradient(
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+        colors: [Color(0xFF8DDDFF), Color(0xFFFFFFFF), Color(0xFFFFFFFF)],
+      ).createShader(bounds),
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        style: GoogleFonts.getFont(
+          'Onest',
+          color: Colors.white,
+          fontSize: 31,
+          fontWeight: FontWeight.w700,
+          height: 1.16,
         ),
-        const SizedBox(height: 6),
-        Text(
-          subtitle,
-          style: GoogleFonts.manrope(
-            fontSize: 13,
-            color: AppColors.textSecondary,
-            height: 1.5,
-          ),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget _hintRow(IconData icon, String text) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, color: AppColors.primary, size: 18),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            text,
-            style: GoogleFonts.manrope(
-              fontSize: 13,
-              color: AppColors.textSecondary,
+  Widget _paragraph(String text) {
+    return Text(
+      text,
+      textAlign: TextAlign.center,
+      style: GoogleFonts.getFont(
+        'Onest',
+        color: const Color(0xFFD2EEFF),
+        fontSize: 16,
+        fontWeight: FontWeight.w400,
+        height: 1.45,
+      ),
+    );
+  }
+
+  Widget _botDescription() {
+    final baseStyle = GoogleFonts.getFont(
+      'Onest',
+      color: const Color(0xFFD2EEFF),
+      fontSize: 16,
+      fontWeight: FontWeight.w400,
+      height: 1.45,
+    );
+
+    return RichText(
+      textAlign: TextAlign.center,
+      text: TextSpan(
+        style: baseStyle,
+        children: const [
+          TextSpan(text: 'В открывшемся боте нажмите\n'),
+          TextSpan(
+            text: '“Start” / “Подтвердить”',
+            style: TextStyle(
+              color: Color(0xFF00A2FF),
+              fontWeight: FontWeight.w600,
             ),
           ),
-        ),
-      ],
-    );
-  }
-
-  Widget _phoneField() {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.bgCard,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: TextField(
-        controller: _phoneCtrl,
-        focusNode: _phoneFocus,
-        keyboardType: TextInputType.phone,
-        inputFormatters: [
-          FilteringTextInputFormatter.allow(RegExp(r'[\d\s\-\(\)\+]')),
+          TextSpan(text: ', затем вернитесь сюда\nи нажмите кнопку ниже.'),
         ],
-        style: GoogleFonts.manrope(color: AppColors.textPrimary, fontSize: 16),
-        onSubmitted: (_) => _onPhoneNext(),
-        decoration: InputDecoration(
-          hintText: '+7 900 123-45-67',
-          hintStyle: GoogleFonts.manrope(
-            color: AppColors.textHint,
-            fontSize: 15,
-          ),
-          prefixIcon: const Icon(
-            Icons.phone_rounded,
-            color: AppColors.textHint,
-            size: 20,
-          ),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(
-            vertical: 16,
-            horizontal: 14,
-          ),
-        ),
       ),
     );
   }
 
-  Widget _codeField() {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.bgCard,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: TextField(
-        controller: _codeCtrl,
-        focusNode: _codeFocus,
-        keyboardType: TextInputType.number,
-        inputFormatters: [
-          FilteringTextInputFormatter.digitsOnly,
-          LengthLimitingTextInputFormatter(5),
-        ],
-        textAlign: TextAlign.center,
-        style: GoogleFonts.manrope(
-          color: AppColors.textPrimary,
-          fontSize: 26,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 10,
-        ),
-        onSubmitted: (_) => _onVerifyCode(),
-        decoration: InputDecoration(
-          hintText: '·····',
-          hintStyle: GoogleFonts.manrope(
-            color: AppColors.textHint,
-            fontSize: 26,
-            letterSpacing: 10,
-          ),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(
-            vertical: 20,
-            horizontal: 14,
-          ),
-        ),
+  Widget _errorText() {
+    return Text(
+      _error!,
+      textAlign: TextAlign.center,
+      style: GoogleFonts.getFont(
+        'Onest',
+        color: const Color(0xFFFF596B),
+        fontSize: 13,
+        fontWeight: FontWeight.w500,
+        height: 1.35,
       ),
     );
   }
 
   Widget _primaryButton({
-    required IconData icon,
     required String label,
-    required bool loading,
-    required VoidCallback onTap,
+    required FutureOr<void> Function()? onTap,
+    String? iconPath,
   }) {
-    return SizedBox(
-      height: 54,
-      child: DecoratedBox(
+    final radius = BorderRadius.circular(16);
+
+    return GestureDetector(
+      onTap: _busy ? null : onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 54,
         decoration: BoxDecoration(
-          gradient: AppColors.gradientPrimary,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
+          color: const Color(0xFF11A9F4),
+          borderRadius: radius,
+          boxShadow: const [
             BoxShadow(
-              color: AppColors.primary.withValues(alpha: 0.35),
-              blurRadius: 20,
+              color: Color(0x3300A1FF),
+              blurRadius: 18,
+              offset: Offset(0, 8),
             ),
           ],
         ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(16),
-            onTap: loading ? null : onTap,
-            child: Center(
-              child: loading
-                  ? const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2.5,
-                      ),
-                    )
-                  : Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(icon, color: Colors.white, size: 20),
-                        const SizedBox(width: 10),
-                        Text(
-                          label,
-                          style: GoogleFonts.manrope(
-                            color: Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                          ),
+        child: Stack(
+          children: [
+            InsetShadow(borderRadius: radius),
+            Center(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 160),
+                child: _busy
+                    ? const SizedBox(
+                        key: ValueKey('loader'),
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
                         ),
-                      ],
-                    ),
+                      )
+                    : Row(
+                        key: ValueKey(label),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (iconPath != null) ...[
+                            SvgPicture.asset(iconPath, width: 20, height: 20),
+                            const SizedBox(width: 10),
+                          ],
+                          Text(label, style: AppTextStyles.button),
+                        ],
+                      ),
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _secondaryButton({
+  Widget _darkButton({
     required String label,
-    required VoidCallback onTap,
+    required String iconPath,
+    required FutureOr<void> Function()? onTap,
   }) {
-    return SizedBox(
-      height: 46,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 55,
+        decoration: BoxDecoration(
+          color: const Color(0xFF080C1D).withValues(alpha: 0.95),
           borderRadius: BorderRadius.circular(14),
-          onTap: onTap,
-          child: Center(
-            child: Text(
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SvgPicture.asset(iconPath, width: 19, height: 19),
+            const SizedBox(width: 10),
+            Text(
               label,
-              style: GoogleFonts.manrope(
-                fontSize: 14,
-                color: AppColors.textSecondary,
+              style: GoogleFonts.getFont(
+                'Onest',
+                color: const Color(0xFFD2EEFF),
+                fontSize: 16,
                 fontWeight: FontWeight.w500,
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildError(String msg) {
+  Widget _squareButton({
+    required String iconPath,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 55,
+        height: 55,
+        decoration: BoxDecoration(
+          color: const Color(0xFF080C1D).withValues(alpha: 0.95),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Center(child: SvgPicture.asset(iconPath, width: 22, height: 22)),
+      ),
+    );
+  }
+
+  Widget _bottomNav() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: AppColors.error.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.error.withValues(alpha: 0.3)),
+      height: 92,
+      decoration: const BoxDecoration(
+        color: Color(0xFF06081A),
+        border: Border(top: BorderSide(color: Color(0xFF0F1628), width: 1)),
       ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.error_outline_rounded,
-            color: AppColors.error,
-            size: 18,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              msg,
-              style: GoogleFonts.manrope(fontSize: 13, color: AppColors.error),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            _bottomNavIcon(
+              '$_bottomBarAssets/vpn_default.svg',
+              onTap: () => _openMainTab(0),
             ),
-          ),
-        ],
+            _bottomNavIcon(
+              '$_bottomBarAssets/podpiska_default.svg',
+              onTap: () => _openMainTab(1),
+            ),
+            _bottomNavIcon('$_bottomBarAssets/profile_active.svg'),
+          ],
+        ),
       ),
-    ).animate().fadeIn(duration: 200.ms).slideY(begin: -0.1);
+    );
+  }
+
+  Widget _bottomNavIcon(String path, {VoidCallback? onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 129,
+        height: double.infinity,
+        child: Center(child: SvgPicture.asset(path, width: 129, height: 64)),
+      ),
+    );
+  }
+
+  String _formatDuration(Duration duration) {
+    final hours = duration.inHours.toString().padLeft(2, '0');
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$hours:$minutes:$seconds';
   }
 }

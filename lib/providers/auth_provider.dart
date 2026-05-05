@@ -9,17 +9,16 @@ import '../services/secure_storage.dart';
 ///     └── nothing      → idle (show AuthScreen)
 ///
 /// AuthScreen drives:
-///   idle → phoneEntered (user entered phone, app opens bot)
-///        → codeSent     (bot received contact, code sent to @VerificationCodes)
-///        → verifying    (app is calling /verify-code)
+///   idle → app creates one-time key and opens Telegram bot
+///        → bot/backend binds key to tg_id via /api/auth_hook
 ///        → authenticated (tg_id received, saved)
 ///        → error        (any step failed)
 enum AuthStep {
   bootstrapping,
   idle,
-  phoneEntered, // phone saved, waiting for user to share contact in bot
-  codeSent, // code sent, waiting for user to enter it
-  verifying, // POST /verify-code in flight
+  phoneEntered, // legacy phone auth fallback
+  codeSent, // legacy code auth fallback
+  verifying,
   authenticated,
   error,
 }
@@ -28,12 +27,14 @@ class AuthState {
   final AuthStep step;
   final String? telegramId;
   final String? phone; // normalised E.164 phone
+  final String? name;
   final String? error;
 
   const AuthState({
     this.step = AuthStep.bootstrapping,
     this.telegramId,
     this.phone,
+    this.name,
     this.error,
   });
 
@@ -45,6 +46,7 @@ class AuthState {
     AuthStep? step,
     String? telegramId,
     String? phone,
+    String? name,
     String? error,
     bool clearError = false,
   }) {
@@ -52,6 +54,7 @@ class AuthState {
       step: step ?? this.step,
       telegramId: telegramId ?? this.telegramId,
       phone: phone ?? this.phone,
+      name: name ?? this.name,
       error: clearError ? null : (error ?? this.error),
     );
   }
@@ -71,11 +74,13 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> _bootstrap() async {
     final id = await VpnSecureStorage.getTelegramId();
     final phone = await VpnSecureStorage.getPhone();
+    final name = await VpnSecureStorage.getName();
     if (id != null && id.isNotEmpty) {
       state = AuthState(
         step: AuthStep.authenticated,
         telegramId: id,
         phone: phone,
+        name: name,
       );
     } else {
       state = const AuthState(step: AuthStep.idle);
@@ -99,13 +104,17 @@ class AuthNotifier extends Notifier<AuthState> {
     state = state.copyWith(step: AuthStep.codeSent, clearError: true);
   }
 
-  /// Called with the verified Telegram ID once the backend confirms the code.
-  Future<void> setVerifiedId(String telegramId) async {
+  /// Called with the verified Telegram ID once the backend confirms the bot key.
+  Future<void> setVerifiedId(String telegramId, {String? name}) async {
     await VpnSecureStorage.saveTelegramId(telegramId);
+    if (name != null && name.isNotEmpty) {
+      await VpnSecureStorage.saveName(name);
+    }
     state = AuthState(
       step: AuthStep.authenticated,
       telegramId: telegramId,
       phone: state.phone,
+      name: name ?? state.name,
     );
   }
 
@@ -125,6 +134,8 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> signOut() async {
     await VpnSecureStorage.clearTelegramId();
     await VpnSecureStorage.clearPhone();
+    await VpnSecureStorage.clearName();
+    await VpnSecureStorage.clearCachedSubscriptionPayload();
     state = const AuthState(step: AuthStep.idle);
   }
 }

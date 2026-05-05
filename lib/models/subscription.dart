@@ -23,6 +23,12 @@ class Subscription {
   /// Plan name as reported by backend (e.g. "1month", "PRO"), or null.
   final String? planName;
 
+  /// Number of devices currently used by the user, if reported by backend.
+  final int? deviceUsedCount;
+
+  /// Maximum allowed device count, if reported by backend.
+  final int? deviceLimitCount;
+
   /// All servers the user can currently connect to.
   final List<VpnServer> servers;
 
@@ -36,6 +42,8 @@ class Subscription {
     this.trafficUsedBytes,
     this.trafficLimitBytes,
     this.planName,
+    this.deviceUsedCount,
+    this.deviceLimitCount,
     this.errorMessage,
   });
 
@@ -49,11 +57,27 @@ class Subscription {
   }
 
   double? get trafficUsedRatio {
-    if (trafficUsedBytes == null || trafficLimitBytes == null || trafficLimitBytes == 0) {
+    if (trafficUsedBytes == null ||
+        trafficLimitBytes == null ||
+        trafficLimitBytes == 0) {
       return null;
     }
     return (trafficUsedBytes! / trafficLimitBytes!).clamp(0.0, 1.0);
   }
+
+  Map<String, dynamic> toCacheJson() => {
+    'success': isActive || servers.isNotEmpty,
+    'items': servers.map((s) => s.url).toList(),
+    'meta': {
+      'status': isActive ? 'active' : 'trial',
+      if (expiresAt != null) 'date_finish': expiresAt!.toIso8601String(),
+      if (trafficUsedBytes != null) 'used_total_bytes': trafficUsedBytes,
+      if (trafficLimitBytes != null) 'traffic_limit_bytes': trafficLimitBytes,
+      if (deviceUsedCount != null) 'devices_used': deviceUsedCount,
+      if (deviceLimitCount != null) 'ip_limit': deviceLimitCount,
+      if (planName != null) 'plan': planName,
+    },
+  };
 
   /// Try to build a Subscription from any reasonable backend response.
   ///
@@ -107,17 +131,22 @@ class Subscription {
   static Subscription _fromMap(Map<String, dynamic> json) {
     // Success flag — backend may use any of: success, ok, status.
     final successRaw = json['success'] ?? json['ok'] ?? json['status'];
-    final success = successRaw == true ||
+    final success =
+        successRaw == true ||
         successRaw == 1 ||
         successRaw == 'ok' ||
         successRaw == 'success';
 
-    final errorMessage = (json['error'] ?? json['message'] ?? json['detail']) as String?;
+    final errorMessage =
+        (json['error'] ?? json['message'] ?? json['detail']) as String?;
 
-    dynamic serversRaw = json['servers'] ??
+    dynamic serversRaw =
+        json['servers'] ??
         json['items'] ??
         json['configs'] ??
         json['vless'] ??
+        json['trial_servers'] ??
+        json['free_servers'] ??
         json['data'] ??
         (json['subscription'] is Map ? json['subscription']['servers'] : null);
 
@@ -141,15 +170,20 @@ class Subscription {
     }
 
     // Subscription meta — also defensive.
-    final subRaw = json['subscription'] is Map<String, dynamic>
-        ? json['subscription'] as Map<String, dynamic>
-        : json;
+    final subRaw = json['meta'] is Map<String, dynamic>
+        ? json['meta'] as Map<String, dynamic>
+        : (json['subscription'] is Map<String, dynamic>
+              ? json['subscription'] as Map<String, dynamic>
+              : json);
 
     DateTime? expiresAt;
-    final expField = subRaw['expires_at'] ??
+    final expField =
+        subRaw['expires_at'] ??
         subRaw['expiration'] ??
         subRaw['expire'] ??
-        subRaw['valid_until'];
+        subRaw['valid_until'] ??
+        subRaw['date_finish'] ??
+        subRaw['finished_at'];
     if (expField is String) {
       expiresAt = DateTime.tryParse(expField);
     } else if (expField is int) {
@@ -159,18 +193,70 @@ class Subscription {
       );
     }
 
-    int? trafficUsed = _asInt(subRaw['traffic_used'] ??
-        subRaw['used'] ??
-        subRaw['usage'] ??
-        subRaw['traffic']);
-    int? trafficLimit = _asInt(subRaw['traffic_limit'] ??
-        subRaw['limit'] ??
-        subRaw['quota'] ??
-        subRaw['total']);
+    final trafficUsed = _trafficBytesFrom(
+      subRaw,
+      byteKeys: const [
+        'traffic_used_bytes',
+        'used_total_bytes',
+        'used_bytes',
+        'traffic_used',
+        'used',
+        'usage',
+        'traffic',
+      ],
+      gbKeys: const ['traffic_used_gb', 'used_total_gb', 'used_gb'],
+    );
+    final trafficLimit = _trafficBytesFrom(
+      subRaw,
+      byteKeys: const [
+        'traffic_limit_bytes',
+        'limit_bytes',
+        'quota_bytes',
+        'total_bytes',
+        'traffic_limit',
+        'limit',
+        'quota',
+        'total',
+      ],
+      gbKeys: const [
+        'traffic_whitelist_total_gb',
+        'traffic_limit_gb',
+        'limit_gb',
+        'quota_gb',
+        'total_gb',
+      ],
+    );
+    final deviceUsed = _asInt(
+      subRaw['devices_used'] ??
+          subRaw['device_used'] ??
+          subRaw['used_devices'] ??
+          subRaw['active_devices'] ??
+          subRaw['devices_current'],
+    );
+    final deviceLimit = _asInt(
+      subRaw['devices_limit'] ??
+          subRaw['device_limit'] ??
+          subRaw['ip_limit'] ??
+          subRaw['limit_devices'] ??
+          subRaw['max_devices'] ??
+          subRaw['devices_total'],
+    );
 
-    final plan = (subRaw['plan'] ?? subRaw['tariff'] ?? subRaw['type']) as String?;
+    final plan =
+        (subRaw['plan'] ?? subRaw['tariff'] ?? subRaw['type']) as String?;
+    final status = (subRaw['status'] ?? json['status'])
+        ?.toString()
+        .toLowerCase();
+    final activeByStatus =
+        status == null ||
+        status == 'active' ||
+        status == 'paid' ||
+        status == 'enabled';
 
-    final isActive = success && servers.isNotEmpty &&
+    final isActive =
+        success &&
+        activeByStatus &&
+        servers.isNotEmpty &&
         (expiresAt == null || expiresAt.isAfter(DateTime.now()));
 
     return Subscription(
@@ -180,6 +266,8 @@ class Subscription {
       trafficUsedBytes: trafficUsed,
       trafficLimitBytes: trafficLimit,
       planName: plan,
+      deviceUsedCount: deviceUsed,
+      deviceLimitCount: deviceLimit,
       errorMessage: success ? null : errorMessage,
     );
   }
@@ -189,6 +277,68 @@ class Subscription {
     if (v is int) return v;
     if (v is double) return v.toInt();
     if (v is String) return int.tryParse(v);
+    return null;
+  }
+
+  static int? _trafficBytesFrom(
+    Map<String, dynamic> raw, {
+    required List<String> byteKeys,
+    required List<String> gbKeys,
+  }) {
+    for (final key in byteKeys) {
+      final value = raw[key];
+      if (value == null) continue;
+      final parsed = _asBytes(value);
+      if (parsed != null) return parsed;
+    }
+    for (final key in gbKeys) {
+      final value = raw[key];
+      if (value == null) continue;
+      final parsed = _asGigabytes(value);
+      if (parsed != null) return parsed;
+    }
+    return null;
+  }
+
+  static int? _asBytes(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    if (value is String) {
+      final normalized = value.trim().replaceAll(',', '.').toLowerCase();
+      final number = double.tryParse(
+        RegExp(r'[\d.]+').firstMatch(normalized)?.group(0) ?? '',
+      );
+      if (number == null) return null;
+      if (normalized.contains('tb')) {
+        return (number * 1099511627776).round();
+      }
+      if (normalized.contains('gb')) {
+        return (number * 1073741824).round();
+      }
+      if (normalized.contains('mb')) {
+        return (number * 1048576).round();
+      }
+      if (normalized.contains('kb')) {
+        return (number * 1024).round();
+      }
+      return number.round();
+    }
+    return null;
+  }
+
+  static int? _asGigabytes(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value * 1073741824;
+    if (value is double) return (value * 1073741824).round();
+    if (value is String) {
+      final normalized = value.trim().replaceAll(',', '.');
+      final number = double.tryParse(
+        RegExp(r'[\d.]+').firstMatch(normalized)?.group(0) ?? '',
+      );
+      if (number == null) return null;
+      return (number * 1073741824).round();
+    }
     return null;
   }
 }

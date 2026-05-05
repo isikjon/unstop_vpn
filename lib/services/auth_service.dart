@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+
 import 'package:http/http.dart' as http;
 import '../config/app_config.dart';
+import 'device_headers_service.dart';
 
 class SendCodeResult {
   final String codeType;
@@ -10,12 +13,80 @@ class SendCodeResult {
   const SendCodeResult({required this.codeType, required this.delivery});
 }
 
+class BotAuthStartResult {
+  final String key;
+  final String botLink;
+
+  const BotAuthStartResult({required this.key, required this.botLink});
+}
+
+class BotAuthStatusResult {
+  final bool authenticated;
+  final String? telegramId;
+  final String? name;
+
+  const BotAuthStatusResult({
+    required this.authenticated,
+    this.telegramId,
+    this.name,
+  });
+}
+
 class AuthService {
-  static Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Api-Key': AppConfig.apiKey,
-      };
+  static final _random = Random.secure();
+
+  static Future<Map<String, String>> _headers() =>
+      DeviceHeadersService.apiHeaders();
+
+  /// Bot-only auth: the app generates a numeric key and opens Telegram with
+  /// `start=key_<key>`. The bot posts `key/tg_id/name` to `/api/auth_hook`.
+  static Future<BotAuthStartResult> startBotAuth() async {
+    final key = _generateNumericKey();
+    return BotAuthStartResult(
+      key: key,
+      botLink: AppConfig.botStartLink('key_$key'),
+    );
+  }
+
+  /// Poll backend until Telegram bot/webhook binds key to tg_id.
+  static Future<BotAuthStatusResult> checkBotAuth(String key) async {
+    final primary = await _checkBotAuthOnce(key);
+    if (primary.authenticated || key.startsWith('key_')) return primary;
+    return _checkBotAuthOnce('key_$key');
+  }
+
+  static Future<BotAuthStatusResult> _checkBotAuthOnce(String key) async {
+    final uri = Uri.parse('${AppConfig.apiBase}/auth/status/$key');
+    http.Response response;
+    try {
+      response = await http
+          .get(uri, headers: await _headers())
+          .timeout(AppConfig.apiTimeout);
+    } on TimeoutException {
+      throw AuthException('Сервер не отвечает');
+    } catch (_) {
+      throw AuthException('Нет соединения с сервером');
+    }
+
+    if (response.statusCode != 200) {
+      throw AuthException(
+        'Ошибка проверки авторизации (${response.statusCode})',
+      );
+    }
+
+    try {
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      final authenticated = json['authenticated'] == true;
+      final id = json['telegram_id'] ?? json['tg_id'] ?? json['user_id'];
+      return BotAuthStatusResult(
+        authenticated: authenticated && id != null,
+        telegramId: id?.toString(),
+        name: json['name']?.toString(),
+      );
+    } catch (_) {
+      throw AuthException('Неверный ответ сервера');
+    }
+  }
 
   /// Primary auth: check if the bot already received the user's contact.
   /// Returns telegram_id if found, null otherwise.
@@ -24,7 +95,11 @@ class AuthService {
     http.Response response;
     try {
       response = await http
-          .post(uri, headers: _headers, body: jsonEncode({'phone': phone}))
+          .post(
+            uri,
+            headers: await _headers(),
+            body: jsonEncode({'phone': phone}),
+          )
           .timeout(AppConfig.apiTimeout);
     } on TimeoutException {
       throw AuthException('Сервер не отвечает');
@@ -49,7 +124,11 @@ class AuthService {
     http.Response response;
     try {
       response = await http
-          .post(uri, headers: _headers, body: jsonEncode({'phone': phone}))
+          .post(
+            uri,
+            headers: await _headers(),
+            body: jsonEncode({'phone': phone}),
+          )
           .timeout(AppConfig.apiTimeout);
     } on TimeoutException {
       throw AuthException('Сервер не отвечает');
@@ -70,7 +149,8 @@ class AuthService {
       final json = jsonDecode(response.body);
       if (json['success'] == false) {
         throw AuthException(
-            json['error'] ?? json['detail'] ?? 'Не удалось отправить код');
+          json['error'] ?? json['detail'] ?? 'Не удалось отправить код',
+        );
       }
       return SendCodeResult(
         codeType: (json['code_type'] ?? 'UNKNOWN').toString(),
@@ -88,7 +168,11 @@ class AuthService {
     http.Response response;
     try {
       response = await http
-          .post(uri, headers: _headers, body: jsonEncode({'phone': phone}))
+          .post(
+            uri,
+            headers: await _headers(),
+            body: jsonEncode({'phone': phone}),
+          )
           .timeout(AppConfig.apiTimeout);
     } on TimeoutException {
       throw AuthException('Сервер не отвечает');
@@ -126,7 +210,7 @@ class AuthService {
       response = await http
           .post(
             uri,
-            headers: _headers,
+            headers: await _headers(),
             body: jsonEncode({'phone': phone, 'code': code}),
           )
           .timeout(AppConfig.apiTimeout);
@@ -148,13 +232,10 @@ class AuthService {
     try {
       final json = jsonDecode(response.body);
       if (json['success'] == false) {
-        throw AuthException(
-            json['error'] ?? json['detail'] ?? 'Неверный код');
+        throw AuthException(json['error'] ?? json['detail'] ?? 'Неверный код');
       }
-      final id = json['telegram_id'] ??
-          json['tg_id'] ??
-          json['user_id'] ??
-          json['id'];
+      final id =
+          json['telegram_id'] ?? json['tg_id'] ?? json['user_id'] ?? json['id'];
       if (id == null) {
         throw AuthException('Сервер не вернул Telegram ID');
       }
@@ -164,6 +245,10 @@ class AuthService {
       throw AuthException('Неверный ответ сервера');
     }
   }
+}
+
+String _generateNumericKey() {
+  return (AuthService._random.nextInt(900000000) + 100000000).toString();
 }
 
 class AuthException implements Exception {

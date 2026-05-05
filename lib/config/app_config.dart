@@ -1,8 +1,11 @@
 /// Hardcoded constants for backend integration and external links.
 class AppConfig {
+  /// App version used in backend user-agent/device tracking headers.
+  static const String appVersion = '1.0.0';
+
   /// Base URL нашего бэкенда на сервере 2.26.124.34.
   /// Все запросы (подписка + auth) идут через него.
-  static const String apiBase = 'http://2.26.124.34:8000/api';
+  static const String apiBase = 'http://dev-game.404.mn:8000/api';
 
   /// API-ключ — одинаковый для клиента и сервера.
   static const String apiKey = 'aksdSDA12osadQWE493123wsaS';
@@ -25,5 +28,5 @@ class AppConfig {
   static const Duration subscriptionRefreshInterval = Duration(minutes: 15);
 
   /// HTTP timeout for API calls.
-  static const Duration apiTimeout = Duration(seconds: 15);
+  static const Duration apiTimeout = Duration(seconds: 6);
 }

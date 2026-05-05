@@ -41,6 +41,7 @@ dependencies:
   http: ^1.6.0
   url_launcher: ^6.3.1
   flutter_svg: ^2.0.10
+  device_info_plus: ^12.4.0
 
 dev_dependencies:
   flutter_test:
@@ -61,11 +62,13 @@ flutter:
 
   assets:
     - assets/images/
-    - bottombar_newicons/
-    - Выбор сервера assets/
-    - настройки assets/
-    - подключено assets/
-    - close.svg
+    - assets/icons/
+    - assets/icons/bottom_bar/
+    - assets/icons/settings/
+    - assets/icons/connected/
+    - assets/icons/subscription/
+    - assets/server_selection/
+    - assets/auth/
 
 flutter_launcher_icons:
   android: true

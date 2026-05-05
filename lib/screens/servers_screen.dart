@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -5,7 +8,8 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../models/vpn_server.dart';
 import '../providers/subscription_provider.dart';
-import '../providers/vpn_provider.dart';
+import '../providers/trial_provider.dart';
+import '../services/secure_storage.dart';
 import '../theme/app_theme.dart';
 import '../widgets/inset_shadow.dart';
 
@@ -18,10 +22,27 @@ class ServersScreen extends ConsumerStatefulWidget {
 
 class _ServersScreenState extends ConsumerState<ServersScreen> {
   String _searchQuery = '';
+  Set<String> _pinnedServerIds = <String>{};
+  final Map<String, String> _serverPings = <String, String>{};
+  final Set<String> _pendingPingIds = <String>{};
+  String? _openActionServerId;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPinnedServers();
+  }
+
+  Future<void> _loadPinnedServers() async {
+    final pinnedIds = await VpnSecureStorage.getPinnedServerIds();
+    if (!mounted) return;
+    setState(() => _pinnedServerIds = pinnedIds);
+  }
 
   @override
   Widget build(BuildContext context) {
     final subState = ref.watch(subscriptionProvider);
+    final trial = ref.watch(trialProvider);
     final servers = subState.subscription.servers
         .where(
           (s) =>
@@ -31,6 +52,13 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
               s.city.toLowerCase().contains(_searchQuery.toLowerCase()),
         )
         .toList();
+    servers.sort((a, b) {
+      final aPinned = _pinnedServerIds.contains(_serverPinId(a));
+      final bPinned = _pinnedServerIds.contains(_serverPinId(b));
+      if (aPinned == bPinned) return 0;
+      return aPinned ? -1 : 1;
+    });
+    _ensureServerPings(servers);
 
     return Scaffold(
       backgroundColor: const Color(0xFF000214),
@@ -48,11 +76,15 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
                 if (servers.isNotEmpty) ...[
                   _buildServerList(servers),
                   const SizedBox(height: 18),
+                ] else if (subState.isLoading && !trial.isExpired) ...[
+                  _buildServersLoadingCard(),
+                  const SizedBox(height: 18),
                 ] else ...[
-                  _buildPreviewServer(),
+                  _buildNoServersCard(trial.isExpired),
                   const SizedBox(height: 18),
                 ],
-                if (!subState.subscription.isActive) _buildNoSubscriptionCard(),
+                if (!subState.subscription.isActive)
+                  _buildNoSubscriptionCard(enabled: !trial.isExpired),
               ],
             ),
           ),
@@ -75,7 +107,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
               onTap: () => Navigator.of(context).pop(),
               behavior: HitTestBehavior.opaque,
               child: SvgPicture.asset(
-                'Выбор сервера assets/back_btn.svg',
+                'assets/server_selection/back_btn.svg',
                 width: 48,
                 height: 48,
               ),
@@ -108,10 +140,10 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
           Positioned(
             right: 0,
             child: GestureDetector(
-              onTap: () => ref.read(subscriptionProvider.notifier).refresh(),
+              onTap: _refreshServers,
               behavior: HitTestBehavior.opaque,
               child: SvgPicture.asset(
-                'Выбор сервера assets/reload_btn.svg',
+                'assets/server_selection/reload_btn.svg',
                 width: 48,
                 height: 48,
               ),
@@ -120,6 +152,14 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _refreshServers() async {
+    setState(() {
+      _serverPings.clear();
+      _pendingPingIds.clear();
+    });
+    await ref.read(subscriptionProvider.notifier).refresh();
   }
 
   Widget _buildSearch() {
@@ -156,10 +196,9 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
   }
 
   Widget _buildServerList(List<VpnServer> servers) {
-    final selectedId =
-        ref.watch(subscriptionProvider).selectedServer?.id ?? servers.first.id;
-    final activeServerId = ref.watch(vpnProvider).activeServer?.id;
-
+    final selectedUrl =
+        ref.watch(subscriptionProvider).selectedServer?.url ??
+        servers.first.url;
     return Column(
       children: [
         for (final server in servers)
@@ -167,8 +206,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
             padding: const EdgeInsets.only(bottom: 12),
             child: _buildServerTile(
               server: server,
-              isSelected: server.id == selectedId,
-              isActive: server.id == activeServerId,
+              isSelected: server.url == selectedUrl,
             ),
           ),
       ],
@@ -178,47 +216,168 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
   Widget _buildServerTile({
     required VpnServer server,
     required bool isSelected,
-    required bool isActive,
   }) {
-    return GestureDetector(
-      onTap: () async {
-        await ref.read(subscriptionProvider.notifier).selectServer(server);
-        ref
-            .read(selectedServerDisplayProvider.notifier)
-            .select(ServerDisplay.fromVpnServer(server));
-        if (mounted && Navigator.of(context).canPop()) {
-          Navigator.of(context).pop();
-        }
+    final pinId = _serverPinId(server);
+    final isPinned = _pinnedServerIds.contains(pinId);
+    final isActionOpen = _openActionServerId == pinId;
+
+    return _SwipePinnedServerTile(
+      isOpen: isActionOpen,
+      isPinned: isPinned,
+      onOpenChanged: (isOpen) {
+        setState(() => _openActionServerId = isOpen ? pinId : null);
       },
-      behavior: HitTestBehavior.opaque,
-      child: _ServerCard(
-        flag: server.flag,
-        title: server.country,
-        ping: isActive ? 'Active' : '67ms',
+      onTogglePinned: () => _togglePinnedServer(server),
+      child: GestureDetector(
+        onTap: () async {
+          if (_openActionServerId != null) {
+            setState(() => _openActionServerId = null);
+            return;
+          }
+          await ref.read(subscriptionProvider.notifier).selectServer(server);
+          ref
+              .read(selectedServerDisplayProvider.notifier)
+              .select(ServerDisplay.fromVpnServer(server));
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        },
+        behavior: HitTestBehavior.opaque,
+        child: _ServerCard(
+          flag: server.flag,
+          title: _serverDisplayTitle(server),
+          ping: _serverPings[server.url] ?? '...',
+          isSelected: isSelected,
+          isPinned: isPinned,
+          isBypass: _isBypassServer(server),
+        ),
       ),
     );
   }
 
-  Widget _buildPreviewServer() {
-    return GestureDetector(
-      onTap: () {
-        ref
-            .read(selectedServerDisplayProvider.notifier)
-            .select(
-              const ServerDisplay(
-                flag: '🇫🇷',
-                country: 'Франция',
-                subtitle: '67ms',
-              ),
-            );
-        Navigator.of(context).pop();
-      },
-      behavior: HitTestBehavior.opaque,
-      child: const _ServerCard(flag: '🇫🇷', title: 'Франция', ping: '67ms'),
+  void _ensureServerPings(List<VpnServer> servers) {
+    for (final server in servers) {
+      final pingId = server.url;
+      if (_serverPings.containsKey(pingId) ||
+          _pendingPingIds.contains(pingId)) {
+        continue;
+      }
+      _pendingPingIds.add(pingId);
+      unawaited(_loadServerPing(server));
+    }
+  }
+
+  Future<void> _loadServerPing(VpnServer server) async {
+    final ping = await _measureTcpPing(server);
+    if (!mounted) return;
+    setState(() {
+      _pendingPingIds.remove(server.url);
+      _serverPings[server.url] = ping == null ? '--ms' : '${ping}ms';
+    });
+  }
+
+  Future<int?> _measureTcpPing(VpnServer server) async {
+    Socket? socket;
+    final stopwatch = Stopwatch()..start();
+    try {
+      socket = await Socket.connect(
+        server.address,
+        server.port,
+        timeout: const Duration(milliseconds: 900),
+      );
+      stopwatch.stop();
+      return stopwatch.elapsedMilliseconds.clamp(1, 9999);
+    } catch (_) {
+      return null;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  Future<void> _togglePinnedServer(VpnServer server) async {
+    final pinId = _serverPinId(server);
+    setState(() {
+      if (!_pinnedServerIds.remove(pinId)) {
+        _pinnedServerIds.add(pinId);
+      }
+      _openActionServerId = null;
+    });
+    await VpnSecureStorage.savePinnedServerIds(_pinnedServerIds);
+  }
+
+  String _serverPinId(VpnServer server) => server.url;
+
+  bool _isBypassServer(VpnServer server) {
+    final text = '${server.remark} ${server.country}'.toLowerCase();
+    return text.contains('обход') || text.contains('глушил');
+  }
+
+  String _serverDisplayTitle(VpnServer server) {
+    if (!_isBypassServer(server)) return server.country;
+
+    final withoutFlags = server.remark
+        .replaceAll(RegExp(r'[\u{1F1E6}-\u{1F1FF}]', unicode: true), '')
+        .trim();
+    final withoutNoise = withoutFlags
+        .replaceAll(RegExp(r'\s*/\s*lte\s*', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    return withoutNoise.isEmpty ? 'Обход глушилок' : withoutNoise;
+  }
+
+  Widget _buildServersLoadingCard() {
+    return Container(
+      height: 80,
+      decoration: BoxDecoration(
+        color: const Color(0xFF080B1B),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF0F1628)),
+      ),
+      child: Center(
+        child: Text(
+          'Загружаем серверы...',
+          style: GoogleFonts.manrope(
+            fontSize: 15,
+            color: const Color(0xFF628499),
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _buildNoSubscriptionCard() {
+  Widget _buildNoServersCard(bool trialExpired) {
+    return Container(
+      height: 80,
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      decoration: BoxDecoration(
+        color: const Color(0xFF080B1B),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF0F1628)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.lock_outline, color: Color(0xFF628499), size: 28),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              trialExpired
+                  ? 'Пробный период истёк'
+                  : 'Пробный сервер не получен от API',
+              style: GoogleFonts.manrope(
+                fontSize: 15,
+                color: const Color(0xFF628499),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoSubscriptionCard({required bool enabled}) {
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
@@ -229,7 +388,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
       child: Column(
         children: [
           Image.asset(
-            'Выбор сервера assets/ads.png',
+            'assets/server_selection/ads.png',
             width: double.infinity,
             fit: BoxFit.cover,
           ),
@@ -259,7 +418,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                _buildSubscribeButton(),
+                _buildSubscribeButton(enabled: enabled),
               ],
             ),
           ),
@@ -268,15 +427,15 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
     );
   }
 
-  Widget _buildSubscribeButton() {
+  Widget _buildSubscribeButton({required bool enabled}) {
     return GestureDetector(
-      onTap: () => Navigator.of(context).pop(),
+      onTap: enabled ? () => Navigator.of(context).pop() : null,
       child: Container(
         clipBehavior: Clip.antiAlias,
         height: 60,
         width: double.infinity,
         decoration: BoxDecoration(
-          color: const Color(0xFF00A2FF),
+          color: enabled ? const Color(0xFF00A2FF) : const Color(0xFF172134),
           borderRadius: BorderRadius.circular(16),
         ),
         child: Stack(
@@ -346,15 +505,97 @@ class _ServersBackgroundPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+class _SwipePinnedServerTile extends StatelessWidget {
+  final bool isOpen;
+  final bool isPinned;
+  final ValueChanged<bool> onOpenChanged;
+  final VoidCallback onTogglePinned;
+  final Widget child;
+
+  const _SwipePinnedServerTile({
+    required this.isOpen,
+    required this.isPinned,
+    required this.onOpenChanged,
+    required this.onTogglePinned,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const actionWidth = 80.0;
+
+    return SizedBox(
+      height: 80,
+      child: Stack(
+        fit: StackFit.expand,
+        alignment: Alignment.centerRight,
+        children: [
+          Positioned(
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: actionWidth,
+            child: GestureDetector(
+              onTap: onTogglePinned,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF080B1B),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Center(
+                  child: SvgPicture.asset(
+                    isPinned
+                        ? 'assets/server_selection/unpin.svg'
+                        : 'assets/server_selection/pin.svg',
+                    width: 24,
+                    height: 24,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          GestureDetector(
+            onHorizontalDragEnd: (details) {
+              final velocity = details.primaryVelocity ?? 0;
+              if (velocity < -120) {
+                onOpenChanged(true);
+              } else if (velocity > 120) {
+                onOpenChanged(false);
+              }
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              transform: Matrix4.translationValues(
+                isOpen ? -actionWidth - 12 : 0,
+                0,
+                0,
+              ),
+              child: child,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ServerCard extends StatelessWidget {
   final String flag;
   final String title;
   final String ping;
+  final bool isSelected;
+  final bool isPinned;
+  final bool isBypass;
 
   const _ServerCard({
     required this.flag,
     required this.title,
     required this.ping,
+    this.isSelected = false,
+    this.isPinned = false,
+    this.isBypass = false,
   });
 
   @override
@@ -365,22 +606,48 @@ class _ServerCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFF080B1B),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF0F1628)),
+        border: Border.all(
+          color: isSelected ? const Color(0xFF00A1FF) : const Color(0xFF0F1628),
+        ),
       ),
       child: Row(
         children: [
-          Text(flag, style: const TextStyle(fontSize: 28)),
+          if (isBypass)
+            SvgPicture.asset(
+              'assets/server_selection/obxod_glushilok.svg',
+              width: 36,
+              height: 36,
+            )
+          else
+            Text(flag, style: const TextStyle(fontSize: 28)),
           const SizedBox(width: 16),
           Expanded(
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.manrope(
-                fontSize: 18,
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.manrope(
+                      fontSize: 18,
+                      color: isSelected
+                          ? const Color(0xFF00A1FF)
+                          : Colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                if (isPinned) ...[
+                  const SizedBox(width: 8),
+                  SvgPicture.asset(
+                    'assets/server_selection/pinned.svg',
+                    width: 16,
+                    height: 16,
+                  ),
+                ],
+              ],
             ),
           ),
           Text(

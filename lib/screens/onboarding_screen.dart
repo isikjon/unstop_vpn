@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../providers/auth_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/inset_shadow.dart';
 
-class OnboardingScreen extends StatelessWidget {
+class OnboardingScreen extends ConsumerWidget {
   const OnboardingScreen({super.key});
 
   static Future<bool> isFirstLaunch() async {
@@ -20,7 +22,7 @@ class OnboardingScreen extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final size = MediaQuery.of(context).size;
 
     return Scaffold(
@@ -128,7 +130,11 @@ class OnboardingScreen extends StatelessWidget {
                         onTap: () async {
                           await OnboardingScreen.markDone();
                           if (context.mounted) {
-                            Navigator.pushReplacementNamed(context, '/home');
+                            final auth = ref.read(authProvider);
+                            Navigator.pushReplacementNamed(
+                              context,
+                              auth.isAuthenticated ? '/home' : '/auth',
+                            );
                           }
                         },
                       )

@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -7,13 +5,16 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config/app_config.dart';
+import '../models/subscription.dart';
 import '../models/vpn_status.dart';
 import '../providers/auth_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/subscription_provider.dart';
+import '../providers/trial_provider.dart';
 import '../providers/vpn_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/inset_shadow.dart';
+import '../widgets/subscription_status_badge.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
@@ -23,25 +24,7 @@ class ProfileScreen extends ConsumerStatefulWidget {
 }
 
 class _ProfileScreenState extends ConsumerState<ProfileScreen> {
-  static const _settingsAssets = 'настройки assets';
-
-  Timer? _trialTimer;
-  Duration _trialTimeLeft = const Duration(hours: 23, minutes: 59, seconds: 47);
-
-  @override
-  void initState() {
-    super.initState();
-    _trialTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || _trialTimeLeft.inSeconds <= 0) return;
-      setState(() => _trialTimeLeft -= const Duration(seconds: 1));
-    });
-  }
-
-  @override
-  void dispose() {
-    _trialTimer?.cancel();
-    super.dispose();
-  }
+  static const _settingsAssets = 'assets/icons/settings';
 
   Future<void> _signOut() async {
     final vpnState = ref.read(vpnProvider);
@@ -52,13 +35,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     if (mounted) {
       Navigator.of(context).pushReplacementNamed('/auth');
     }
-  }
-
-  String _formatDuration(Duration d) {
-    final hours = d.inHours.toString().padLeft(2, '0');
-    final minutes = (d.inMinutes % 60).toString().padLeft(2, '0');
-    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
-    return '$hours:$minutes:$seconds';
   }
 
   @override
@@ -88,64 +64,76 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           ),
           Positioned.fill(child: CustomPaint(painter: _ProfileArcPainter())),
           SafeArea(
-            child: Column(
+            child: ListView(
+              padding: EdgeInsets.zero,
               children: [
-                const SizedBox(height: 16),
-                _header(),
-                const SizedBox(height: 54),
-                _identity(auth),
-                const SizedBox(height: 62),
-                _subscriptionCard(subscription.isActive),
-                const SizedBox(height: 8),
-                _settingsRow(
-                  icon: '$_settingsAssets/free_proxy.svg',
-                  title: 'Free Proxy',
-                  subtitle: 'Бесплатное прокси для Telegram',
-                  trailing: _arrowButton(),
-                  onTap: _openSupport,
-                ),
-                _settingsRow(
-                  icon: '$_settingsAssets/obnovit_podpisku.svg',
-                  title: 'Обновить подписку',
-                  subtitle: 'Проверка подписки',
-                  trailing: _refreshButton(),
-                  onTap: () =>
-                      ref.read(subscriptionProvider.notifier).refresh(),
-                ),
-                _settingsRow(
-                  icon: '$_settingsAssets/fragmentirovaniya.svg',
-                  title: 'Фрагментирование',
-                  subtitle:
-                      'Xray • ${tunnel.fragmentPackets} • ${tunnel.fragmentLength} пакетов',
-                  trailing: _toggle(
-                    value: tunnel.fragmentEnabled,
-                    onChanged: (value) => ref
-                        .read(tunnelSettingsProvider.notifier)
-                        .setFragment(value),
+                SizedBox(
+                  height:
+                      MediaQuery.of(context).size.height -
+                      MediaQuery.of(context).padding.top -
+                      MediaQuery.of(context).padding.bottom -
+                      92,
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 16),
+                      _header(subscription),
+                      const SizedBox(height: 48),
+                      _identity(auth),
+                      const SizedBox(height: 52),
+                      _subscriptionCard(subscription),
+                      const SizedBox(height: 8),
+                      _settingsRow(
+                        icon: '$_settingsAssets/free_proxy.svg',
+                        title: 'Free Proxy',
+                        subtitle: 'Бесплатное прокси для Telegram',
+                        trailing: _arrowButton(),
+                        onTap: _openSupport,
+                      ),
+                      _settingsRow(
+                        icon: '$_settingsAssets/obnovit_podpisku.svg',
+                        title: 'Обновить подписку',
+                        subtitle: 'Проверка подписки',
+                        trailing: _refreshButton(),
+                        onTap: () =>
+                            ref.read(subscriptionProvider.notifier).refresh(),
+                      ),
+                      _settingsRow(
+                        icon: '$_settingsAssets/fragmentirovaniya.svg',
+                        title: 'Фрагментирование',
+                        subtitle:
+                            'Xray • ${tunnel.fragmentPackets} • ${tunnel.fragmentLength} пакетов',
+                        trailing: _toggle(
+                          value: tunnel.fragmentEnabled,
+                          onChanged: (value) => ref
+                              .read(tunnelSettingsProvider.notifier)
+                              .setFragment(value),
+                        ),
+                      ),
+                      _settingsRow(
+                        icon: '$_settingsAssets/shumi.svg',
+                        title: 'Шумы',
+                        subtitle:
+                            '${tunnel.noiseType} • задержка ${tunnel.noiseDelay} мс',
+                        trailing: _toggle(
+                          value: tunnel.noiseEnabled,
+                          onChanged: (value) => ref
+                              .read(tunnelSettingsProvider.notifier)
+                              .setNoise(value),
+                        ),
+                      ),
+                      _settingsRow(
+                        icon: '$_settingsAssets/telegram.svg',
+                        title: 'Поддержка 24/7',
+                        subtitle: 'Написать в Telegram',
+                        trailing: _arrowButton(),
+                        onTap: _openSupport,
+                      ),
+                      const Spacer(),
+                      _logoutButton(),
+                      const SizedBox(height: 18),
+                    ],
                   ),
                 ),
-                _settingsRow(
-                  icon: '$_settingsAssets/shumi.svg',
-                  title: 'Шумы',
-                  subtitle:
-                      '${tunnel.noiseType} • задержка ${tunnel.noiseDelay} мс',
-                  trailing: _toggle(
-                    value: tunnel.noiseEnabled,
-                    onChanged: (value) => ref
-                        .read(tunnelSettingsProvider.notifier)
-                        .setNoise(value),
-                  ),
-                ),
-                _settingsRow(
-                  icon: '$_settingsAssets/telegram.svg',
-                  title: 'Поддержка 24/7',
-                  subtitle: 'Написать в Telegram',
-                  trailing: _arrowButton(),
-                  onTap: _openSupport,
-                ),
-                const Spacer(),
-                _logoutButton(),
-                const SizedBox(height: 24),
               ],
             ),
           ),
@@ -154,28 +142,16 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
-  Widget _header() {
+  Widget _header(Subscription subscription) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Image.asset('assets/images/logo.png', height: 24),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0F1628),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              'ПРОБНЫЙ ПЕРИОД: ${_formatDuration(_trialTimeLeft)}',
-              style: GoogleFonts.manrope(
-                fontSize: 10,
-                color: const Color(0xFF628499),
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-              ),
-            ),
+          SubscriptionStatusBadge(
+            subscription: subscription,
+            trialLeft: ref.watch(trialProvider).timeLeft,
           ),
         ],
       ),
@@ -184,7 +160,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   Widget _identity(AuthState auth) {
     final id = auth.telegramId ?? '—';
-    final phone = auth.phone ?? 'Телефон не найден';
+    final accountName = auth.name?.isNotEmpty == true
+        ? auth.name!
+        : 'Telegram аккаунт';
 
     return Column(
       children: [
@@ -209,7 +187,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             ),
             const SizedBox(width: 8),
             Text(
-              phone,
+              accountName,
               style: GoogleFonts.onest(
                 color: const Color(0xFFD2EEFF),
                 fontSize: 16,
@@ -223,7 +201,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
-  Widget _subscriptionCard(bool isActive) {
+  Widget _subscriptionCard(Subscription subscription) {
+    if (subscription.isActive) {
+      return _activeSubscriptionCard(subscription);
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Container(
@@ -243,16 +225,18 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 color: const Color(0x1AFF1F2D),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: const Icon(
-                Icons.shield_outlined,
-                color: Color(0xFFFF1F2D),
-                size: 19,
+              child: Center(
+                child: const Icon(
+                  Icons.shield_outlined,
+                  color: Color(0xFFFF1F2D),
+                  size: 19,
+                ),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                isActive ? 'Подписка активна' : 'Нет подписки',
+                'Нет подписки',
                 style: GoogleFonts.onest(
                   color: Colors.white,
                   fontSize: 18,
@@ -287,6 +271,95 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           child: Text(
                             'Купить подписку',
                             style: AppTextStyles.button.copyWith(fontSize: 15),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _activeSubscriptionCard(Subscription subscription) {
+    final radius = BorderRadius.circular(24);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Container(
+        height: 84,
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: const Color(0xFF11A9F4),
+          borderRadius: radius,
+        ),
+        child: Stack(
+          children: [
+            Positioned.fill(child: InsetShadow(borderRadius: radius)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  SvgPicture.asset(
+                    'assets/icons/padpiska.svg',
+                    width: 36,
+                    height: 36,
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Подписка активна',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.onest(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                            height: 1.15,
+                          ),
+                        ),
+                        const SizedBox(height: 7),
+                        Text(
+                          _formatActiveUntil(subscription.expiresAt),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.onest(
+                            color: const Color(0xFFD2EEFF),
+                            fontSize: 15,
+                            fontWeight: FontWeight.w400,
+                            height: 1.15,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _openSubscriptionBot,
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      width: 104,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF06081A),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Center(
+                        child: Text(
+                          'Продлить',
+                          style: GoogleFonts.onest(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w400,
+                            height: 1.0,
                           ),
                         ),
                       ),
@@ -495,6 +568,32 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
+  }
+
+  String _formatActiveUntil(DateTime? date) {
+    if (date == null) return 'до 15 мая, 16:22';
+    final local = date.toLocal();
+    return 'до ${local.day} ${_monthName(local.month)}, '
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _monthName(int month) {
+    const months = [
+      'января',
+      'февраля',
+      'марта',
+      'апреля',
+      'мая',
+      'июня',
+      'июля',
+      'августа',
+      'сентября',
+      'октября',
+      'ноября',
+      'декабря',
+    ];
+    return months[(month - 1).clamp(0, months.length - 1)];
   }
 }
 

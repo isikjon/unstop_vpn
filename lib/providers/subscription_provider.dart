@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/app_config.dart';
 import '../models/subscription.dart';
@@ -29,7 +31,8 @@ class ServerDisplay {
 
 final selectedServerDisplayProvider =
     NotifierProvider<SelectedServerDisplayNotifier, ServerDisplay?>(
-        SelectedServerDisplayNotifier.new);
+      SelectedServerDisplayNotifier.new,
+    );
 
 class SelectedServerDisplayNotifier extends Notifier<ServerDisplay?> {
   @override
@@ -42,7 +45,6 @@ class SelectedServerDisplayNotifier extends Notifier<ServerDisplay?> {
     state = server;
   }
 }
-
 
 class SubscriptionState {
   final Subscription subscription;
@@ -72,8 +74,9 @@ class SubscriptionState {
       subscription: subscription ?? this.subscription,
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
-      selectedServer:
-          clearSelected ? null : (selectedServer ?? this.selectedServer),
+      selectedServer: clearSelected
+          ? null
+          : (selectedServer ?? this.selectedServer),
     );
   }
 
@@ -87,7 +90,8 @@ class SubscriptionState {
 
 final subscriptionProvider =
     NotifierProvider<SubscriptionNotifier, SubscriptionState>(
-        SubscriptionNotifier.new);
+      SubscriptionNotifier.new,
+    );
 
 class SubscriptionNotifier extends Notifier<SubscriptionState> {
   Timer? _refreshTimer;
@@ -97,7 +101,10 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
     // Auto-refresh whenever the auth state changes (login / logout).
     ref.listen(authProvider, (prev, next) {
       if (next.isAuthenticated && (prev?.telegramId != next.telegramId)) {
-        refresh();
+        Future.microtask(() async {
+          await _loadCachedSubscription();
+          await refresh();
+        });
       }
       if (!next.isAuthenticated) {
         _refreshTimer?.cancel();
@@ -110,10 +117,32 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
     // If we're already authenticated at boot, kick off an initial fetch.
     final auth = ref.read(authProvider);
     if (auth.isAuthenticated) {
-      Future.microtask(refresh);
+      Future.microtask(() async {
+        await _loadCachedSubscription();
+        await refresh();
+      });
     }
 
     return const SubscriptionState();
+  }
+
+  Future<void> _loadCachedSubscription() async {
+    final raw = await VpnSecureStorage.getCachedSubscriptionPayload();
+    if (raw == null || raw.trim().isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      final cached = Subscription.fromAny(decoded);
+      if (cached.servers.isEmpty && !cached.isActive) return;
+      final selected = await _restoreSelectedServer(cached);
+      state = state.copyWith(
+        subscription: cached,
+        selectedServer: selected,
+        isLoading: false,
+        clearError: true,
+      );
+    } catch (_) {
+      await VpnSecureStorage.clearCachedSubscriptionPayload();
+    }
   }
 
   Future<void> refresh() async {
@@ -122,25 +151,16 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
 
     state = state.copyWith(isLoading: true, clearError: true);
     try {
-      final sub = await ApiService.fetchSubscription(auth.telegramId!);
+      final result = await ApiService.fetchSubscriptionResult(auth.telegramId!);
+      final sub = result.subscription;
+      final selected = await _restoreSelectedServer(sub);
 
-      // Restore the previously-selected server if it still exists.
-      VpnServer? selected = state.selectedServer;
-      if (selected != null) {
-        selected = sub.servers
-            .cast<VpnServer?>()
-            .firstWhere((s) => s?.id == selected!.id, orElse: () => null);
-      }
-      if (selected == null) {
-        final savedId = await VpnSecureStorage.getSelectedServerId();
-        if (savedId != null) {
-          for (final s in sub.servers) {
-            if (s.id == savedId) {
-              selected = s;
-              break;
-            }
-          }
-        }
+      if (sub.servers.isNotEmpty || sub.isActive) {
+        await VpnSecureStorage.saveCachedSubscriptionPayload(
+          jsonEncode(sub.toCacheJson()),
+        );
+      } else {
+        await VpnSecureStorage.clearCachedSubscriptionPayload();
       }
 
       state = state.copyWith(
@@ -157,9 +177,31 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
     }
   }
 
+  Future<VpnServer?> _restoreSelectedServer(Subscription sub) async {
+    VpnServer? selected = state.selectedServer;
+    if (selected != null) {
+      selected = sub.servers.cast<VpnServer?>().firstWhere(
+        (s) => s?.id == selected!.id || s?.url == selected.url,
+        orElse: () => null,
+      );
+    }
+    if (selected == null) {
+      final savedId = await VpnSecureStorage.getSelectedServerId();
+      if (savedId != null) {
+        for (final s in sub.servers) {
+          if (s.id == savedId || s.url == savedId) {
+            selected = s;
+            break;
+          }
+        }
+      }
+    }
+    return selected;
+  }
+
   Future<void> selectServer(VpnServer server) async {
     state = state.copyWith(selectedServer: server);
-    await VpnSecureStorage.saveSelectedServerId(server.id);
+    await VpnSecureStorage.saveSelectedServerId(server.url);
   }
 
   void _scheduleNextRefresh() {

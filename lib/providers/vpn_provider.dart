@@ -9,6 +9,7 @@ import '../models/vpn_server.dart';
 import '../services/network_service.dart';
 import 'settings_provider.dart';
 import 'subscription_provider.dart';
+import 'trial_provider.dart';
 
 class VpnState {
   final VpnStatus status;
@@ -139,6 +140,16 @@ class VpnNotifier extends Notifier<VpnState> {
     }
     if (state.status == VpnStatus.connected) {
       await disconnect();
+      return;
+    }
+
+    final subscription = ref.read(subscriptionProvider).subscription;
+    final trial = ref.read(trialProvider);
+    if (!subscription.isActive && trial.isExpired) {
+      state = state.copyWith(
+        status: VpnStatus.error,
+        lastError: 'Пробный период истёк. Оформите подписку.',
+      );
       return;
     }
 

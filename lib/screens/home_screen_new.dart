@@ -6,8 +6,10 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../theme/app_theme.dart';
 import '../providers/vpn_provider.dart';
 import '../providers/subscription_provider.dart';
+import '../providers/trial_provider.dart';
 import '../models/vpn_status.dart';
 import '../widgets/inset_shadow.dart';
+import '../widgets/subscription_status_badge.dart';
 import 'servers_screen.dart';
 
 class HomeScreenNew extends ConsumerStatefulWidget {
@@ -21,7 +23,6 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   bool _showTrialBanner = true;
   bool _showConnectedPreview = false;
   Timer? _trialTimer;
-  Duration _trialTimeLeft = const Duration(hours: 23, minutes: 59, seconds: 47);
   Duration _connectedFor = Duration.zero;
 
   @override
@@ -42,9 +43,6 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
           _showConnectedPreview ||
           ref.read(vpnProvider).status == VpnStatus.connected;
       setState(() {
-        if (_trialTimeLeft.inSeconds > 0) {
-          _trialTimeLeft -= const Duration(seconds: 1);
-        }
         _connectedFor = isConnected
             ? _connectedFor + const Duration(seconds: 1)
             : Duration.zero;
@@ -79,12 +77,18 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   }
 
   Widget _buildHomeContent(bool isConnected) {
+    final hasActiveSubscription = ref
+        .watch(subscriptionProvider)
+        .subscription
+        .isActive;
+    final trial = ref.watch(trialProvider);
+
     return Column(
       children: [
         const SizedBox(height: 16),
         _buildHeader(),
         const SizedBox(height: 16),
-        if (_showTrialBanner) ...[
+        if (_showTrialBanner && !hasActiveSubscription && !trial.isExpired) ...[
           _buildTrialBanner(),
           const SizedBox(height: 24),
         ],
@@ -112,22 +116,9 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
         children: [
           // Logo
           Image.asset('assets/images/logo.png', height: 24),
-          // Trial timer
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0F1628),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              'ПРОБНЫЙ ПЕРИОД: ${_formatDuration(_trialTimeLeft)}',
-              style: GoogleFonts.manrope(
-                fontSize: 10,
-                color: const Color(0xFF628499),
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-              ),
-            ),
+          SubscriptionStatusBadge(
+            subscription: ref.watch(subscriptionProvider).subscription,
+            trialLeft: ref.watch(trialProvider).timeLeft,
           ),
         ],
       ),
@@ -153,7 +144,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
           mainAxisSize: MainAxisSize.min,
           children: [
             SvgPicture.asset(
-              'подключено assets/connect.svg',
+              'assets/icons/connected/connect.svg',
               width: 16,
               height: 16,
             ),
@@ -221,7 +212,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
           children: [
             Expanded(
               child: _buildSpeedMetric(
-                iconPath: 'подключено assets/download.svg',
+                iconPath: 'assets/icons/connected/download.svg',
                 value: '52.4 Mbps',
                 label: 'Download',
                 labelColor: AppColors.success,
@@ -230,7 +221,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
             Container(width: 1, height: 44, color: const Color(0xFF0F1628)),
             Expanded(
               child: _buildSpeedMetric(
-                iconPath: 'подключено assets/upload.svg',
+                iconPath: 'assets/icons/connected/upload.svg',
                 value: '31.2 Mbps',
                 label: 'Upload',
                 labelColor: const Color(0xFFF5700B),
@@ -365,7 +356,11 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
             child: GestureDetector(
               onTap: () => setState(() => _showTrialBanner = false),
               behavior: HitTestBehavior.opaque,
-              child: SvgPicture.asset('close.svg', width: 32, height: 32),
+              child: SvgPicture.asset(
+                'assets/icons/close.svg',
+                width: 32,
+                height: 32,
+              ),
             ),
           ),
         ],
@@ -373,24 +368,33 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
     );
   }
 
-  Widget _buildPowerButton() {
+  Widget _buildPowerButton({required bool enabled}) {
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          _showConnectedPreview = true;
-          _connectedFor = Duration.zero;
-        });
-        ref.read(vpnProvider.notifier).toggleConnection();
-      },
-      child: SvgPicture.asset(
-        'assets/images/big-btn.svg',
-        width: 240,
-        height: 240,
+      onTap: enabled
+          ? () {
+              setState(() {
+                _showConnectedPreview = true;
+                _connectedFor = Duration.zero;
+              });
+              ref.read(vpnProvider.notifier).toggleConnection();
+            }
+          : null,
+      child: Opacity(
+        opacity: enabled ? 1 : 0.45,
+        child: SvgPicture.asset(
+          'assets/images/big-btn.svg',
+          width: 240,
+          height: 240,
+        ),
       ),
     );
   }
 
   Widget _buildVpnControlBlock(bool isConnected) {
+    final subscription = ref.watch(subscriptionProvider).subscription;
+    final trial = ref.watch(trialProvider);
+    final canConnect = subscription.isActive || !trial.isExpired;
+
     return SizedBox(
       height: 284,
       child: AnimatedSwitcher(
@@ -412,18 +416,18 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                 key: const ValueKey('idle-control'),
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildPowerButton(),
+                  _buildPowerButton(enabled: canConnect),
                   const SizedBox(height: 20),
-                  _buildStatusText(),
+                  _buildStatusText(canConnect: canConnect),
                 ],
               ),
       ),
     );
   }
 
-  Widget _buildStatusText() {
+  Widget _buildStatusText({required bool canConnect}) {
     return Text(
-      'Нажмите для подключения...',
+      canConnect ? 'Нажмите для подключения...' : 'Пробный период истёк',
       style: GoogleFonts.manrope(
         fontSize: 14,
         color: const Color(0xFF628499),

@@ -3,26 +3,27 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../config/app_config.dart';
 import '../models/subscription.dart';
+import 'device_headers_service.dart';
 
 /// Thin wrapper around the subscription REST endpoint.
 class ApiService {
-  /// Build standard request headers.
-  /// Adds Authorization only when [AppConfig.apiKey] is non-empty.
-  static Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Api-Key': AppConfig.apiKey,
-      };
-
   /// Fetch the subscription + server list for [telegramId].
   ///
   /// Throws [ApiException] on network or parsing errors.
   static Future<Subscription> fetchSubscription(String telegramId) async {
+    final result = await fetchSubscriptionResult(telegramId);
+    return result.subscription;
+  }
+
+  static Future<SubscriptionFetchResult> fetchSubscriptionResult(
+    String telegramId,
+  ) async {
     final uri = Uri.parse('${AppConfig.apiBase}/app/$telegramId');
     http.Response response;
     try {
+      final headers = await DeviceHeadersService.apiHeaders();
       response = await http
-          .get(uri, headers: _headers)
+          .get(uri, headers: headers)
           .timeout(AppConfig.apiTimeout);
     } on TimeoutException {
       throw ApiException('Сервер не отвечает');
@@ -41,8 +42,16 @@ class ApiService {
           '@${AppConfig.botUsername}.',
         );
       case 404:
-        // Treat 404 as "no subscription".
-        return Subscription.empty;
+        // Treat a plain 404 as "no subscription", but still accept
+        // trial/free server payloads if backend returns them with 404.
+        final decoded404 = _decodeBody(response.body);
+        final fallback = Subscription.fromAny(decoded404);
+        return SubscriptionFetchResult(
+          subscription: fallback.servers.isEmpty
+              ? Subscription.empty
+              : fallback,
+          rawPayload: response.body,
+        );
       default:
         if (response.statusCode >= 500) {
           throw ApiException('Ошибка сервера (${response.statusCode})');
@@ -51,16 +60,32 @@ class ApiService {
     }
 
     final body = response.body;
-    dynamic decoded;
+    final decoded = _decodeBody(body);
+
+    return SubscriptionFetchResult(
+      subscription: Subscription.fromAny(decoded),
+      rawPayload: body,
+    );
+  }
+
+  static dynamic _decodeBody(String body) {
     try {
-      decoded = jsonDecode(body);
+      return jsonDecode(body);
     } catch (_) {
       // Not JSON — try plain vless:// lines.
-      decoded = body;
+      return body;
     }
-
-    return Subscription.fromAny(decoded);
   }
+}
+
+class SubscriptionFetchResult {
+  final Subscription subscription;
+  final String rawPayload;
+
+  const SubscriptionFetchResult({
+    required this.subscription,
+    required this.rawPayload,
+  });
 }
 
 class ApiException implements Exception {
