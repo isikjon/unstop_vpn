@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/auth_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/inset_shadow.dart';
+import '../widgets/shared_hero_background.dart';
 
 class OnboardingScreen extends ConsumerWidget {
   const OnboardingScreen({super.key});
@@ -29,18 +30,7 @@ class OnboardingScreen extends ConsumerWidget {
       backgroundColor: const Color(0xFF05080F),
       body: Stack(
         children: [
-          // ── Background image (top ~68% of screen) ──────────────────────
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: size.height * 0.68,
-            child: Image.asset(
-              'assets/images/onboard_bg.png',
-              fit: BoxFit.cover,
-              alignment: Alignment.topCenter,
-            ),
-          ),
+          const SharedHeroBackground(),
 
           // ── Gradient fade between image and bottom card ─────────────────
           Positioned(

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -19,6 +21,15 @@ class SubscriptionScreen extends ConsumerStatefulWidget {
 }
 
 class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(subscriptionProvider.notifier).refresh();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final subState = ref.watch(subscriptionProvider);
@@ -52,6 +63,11 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     WidgetRef ref,
     SubscriptionState subState,
   ) {
+    final media = MediaQuery.of(context);
+    final availableHeight =
+        media.size.height - media.padding.top - media.padding.bottom - 92;
+    final contentHeight = math.max(availableHeight, 680.0);
+
     return RefreshIndicator(
       color: AppColors.primary,
       backgroundColor: AppColors.bgCard,
@@ -68,11 +84,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
               padding: EdgeInsets.zero,
               children: [
                 SizedBox(
-                  height:
-                      MediaQuery.of(context).size.height -
-                      MediaQuery.of(context).padding.top -
-                      MediaQuery.of(context).padding.bottom -
-                      92,
+                  height: contentHeight,
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(14, 16, 14, 20),
                     child: Column(
@@ -110,8 +122,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   }
 
   Widget _deviceLimitCard(Subscription subscription) {
-    final used = subscription.deviceUsedCount ?? 0;
     final limit = subscription.deviceLimitCount ?? 0;
+    final used =
+        subscription.deviceUsedCount ??
+        (subscription.isActive && limit > 0 ? 1 : 0);
     final progress = limit <= 0 ? 0.0 : (used / limit).clamp(0.0, 1.0);
 
     return _LimitCard(
@@ -227,6 +241,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   }
 
   String _formatGb(double value) {
+    if (value < 0.01) return '0';
     if (value >= 10) return value.toStringAsFixed(2);
     return value.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '');
   }

@@ -65,6 +65,19 @@ class Subscription {
     return (trafficUsedBytes! / trafficLimitBytes!).clamp(0.0, 1.0);
   }
 
+  bool get isDeviceLimitExceeded {
+    final value = errorMessage?.toLowerCase().trim();
+    return value == 'limit_devices' ||
+        value == 'device_limit' ||
+        value == 'devices_limit' ||
+        value?.contains('limit_devices') == true;
+  }
+
+  String? get userFacingError {
+    if (isDeviceLimitExceeded) return 'Лимит устройств исчерпан';
+    return errorMessage;
+  }
+
   Map<String, dynamic> toCacheJson() => {
     'success': isActive || servers.isNotEmpty,
     'items': servers.map((s) => s.url).toList(),
@@ -137,8 +150,8 @@ class Subscription {
         successRaw == 'ok' ||
         successRaw == 'success';
 
-    final errorMessage =
-        (json['error'] ?? json['message'] ?? json['detail']) as String?;
+    final errorMessage = (json['error'] ?? json['message'] ?? json['detail'])
+        ?.toString();
 
     dynamic serversRaw =
         json['servers'] ??
@@ -231,12 +244,21 @@ class Subscription {
           subRaw['device_used'] ??
           subRaw['used_devices'] ??
           subRaw['active_devices'] ??
-          subRaw['devices_current'],
+          subRaw['devices_current'] ??
+          subRaw['devices_count'] ??
+          subRaw['online_devices'] ??
+          subRaw['ip_used'] ??
+          subRaw['ips_used'] ??
+          subRaw['used_ips'] ??
+          subRaw['hwid_count'] ??
+          subRaw['active_hwid'],
     );
     final deviceLimit = _asInt(
       subRaw['devices_limit'] ??
           subRaw['device_limit'] ??
           subRaw['ip_limit'] ??
+          subRaw['ips_limit'] ??
+          subRaw['max_ips'] ??
           subRaw['limit_devices'] ??
           subRaw['max_devices'] ??
           subRaw['devices_total'],
@@ -252,12 +274,15 @@ class Subscription {
         status == 'active' ||
         status == 'paid' ||
         status == 'enabled';
+    final limitError = _isLimitDevicesError(errorMessage);
+    final hasActivePeriod =
+        expiresAt == null || expiresAt.isAfter(DateTime.now());
 
     final isActive =
-        success &&
         activeByStatus &&
-        servers.isNotEmpty &&
-        (expiresAt == null || expiresAt.isAfter(DateTime.now()));
+        hasActivePeriod &&
+        (success || limitError) &&
+        (servers.isNotEmpty || limitError || deviceLimit != null);
 
     return Subscription(
       isActive: isActive,
@@ -270,6 +295,14 @@ class Subscription {
       deviceLimitCount: deviceLimit,
       errorMessage: success ? null : errorMessage,
     );
+  }
+
+  static bool _isLimitDevicesError(String? value) {
+    final normalized = value?.toLowerCase().trim();
+    return normalized == 'limit_devices' ||
+        normalized == 'device_limit' ||
+        normalized == 'devices_limit' ||
+        normalized?.contains('limit_devices') == true;
   }
 
   static int? _asInt(dynamic v) {

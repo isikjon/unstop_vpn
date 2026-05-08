@@ -82,10 +82,26 @@ class SubscriptionState {
 
   /// Effective server: explicit selection > first available > null.
   VpnServer? get effectiveServer {
-    if (selectedServer != null) return selectedServer;
+    if (selectedServer != null && _isConnectableServer(selectedServer!)) {
+      return selectedServer;
+    }
+    for (final server in subscription.servers) {
+      if (_isConnectableServer(server)) return server;
+    }
     if (subscription.servers.isNotEmpty) return subscription.servers.first;
     return null;
   }
+}
+
+bool _isConnectableServer(VpnServer server) {
+  final remark = server.remark.toLowerCase();
+  final country = server.country.toLowerCase();
+  final address = server.address.toLowerCase();
+  if (address == 'ya.ru' && server.port == 1234) return false;
+  if (remark.contains('автовыбор') || country.contains('автовыбор')) {
+    return false;
+  }
+  return true;
 }
 
 final subscriptionProvider =
@@ -184,12 +200,16 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
         (s) => s?.id == selected!.id || s?.url == selected.url,
         orElse: () => null,
       );
+      if (selected != null && !_isConnectableServer(selected)) {
+        selected = null;
+      }
     }
     if (selected == null) {
       final savedId = await VpnSecureStorage.getSelectedServerId();
       if (savedId != null) {
         for (final s in sub.servers) {
-          if (s.id == savedId || s.url == savedId) {
+          if ((s.id == savedId || s.url == savedId) &&
+              _isConnectableServer(s)) {
             selected = s;
             break;
           }

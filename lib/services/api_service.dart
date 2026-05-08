@@ -20,8 +20,9 @@ class ApiService {
   ) async {
     final uri = Uri.parse('${AppConfig.apiBase}/app/$telegramId');
     http.Response response;
+    Map<String, String> headers;
     try {
-      final headers = await DeviceHeadersService.apiHeaders();
+      headers = await DeviceHeadersService.apiHeaders();
       response = await http
           .get(uri, headers: headers)
           .timeout(AppConfig.apiTimeout);
@@ -60,7 +61,8 @@ class ApiService {
     }
 
     final body = response.body;
-    final decoded = _decodeBody(body);
+    var decoded = _decodeBody(body);
+    decoded = await _resolveAppUrlIfNeeded(decoded, headers);
 
     return SubscriptionFetchResult(
       subscription: Subscription.fromAny(decoded),
@@ -75,6 +77,98 @@ class ApiService {
       // Not JSON — try plain vless:// lines.
       return body;
     }
+  }
+
+  /// Some backends return a short subscription payload with `appUrl`, while
+  /// the real server configs are behind that URL. That request must carry the
+  /// same device headers, otherwise the backend can't bind/check the device.
+  static Future<dynamic> _resolveAppUrlIfNeeded(
+    dynamic decoded,
+    Map<String, String> headers,
+  ) async {
+    final appUrls = _extractAppUrls(decoded);
+    if (appUrls.isEmpty) return decoded;
+
+    final servers = <String>[];
+    dynamic fallbackPayload;
+    for (final appUrl in appUrls) {
+      final appPayload = await _fetchAppUrl(appUrl, headers);
+      fallbackPayload ??= appPayload;
+      final appSubscription = Subscription.fromAny(appPayload);
+      servers.addAll(appSubscription.servers.map((server) => server.url));
+    }
+
+    if (decoded is Map<String, dynamic> && servers.isNotEmpty) {
+      return {...decoded, 'items': servers};
+    }
+    return fallbackPayload ?? decoded;
+  }
+
+  static Future<dynamic> _fetchAppUrl(
+    String appUrl,
+    Map<String, String> headers,
+  ) async {
+    final uri = Uri.tryParse(appUrl);
+    if (uri == null || (!uri.hasScheme && !appUrl.startsWith('/'))) {
+      return null;
+    }
+
+    final resolvedUri = uri.hasScheme
+        ? uri
+        : Uri.parse(AppConfig.apiBase).resolve(appUrl);
+
+    http.Response response;
+    try {
+      response = await http
+          .get(resolvedUri, headers: headers)
+          .timeout(AppConfig.apiTimeout);
+    } on TimeoutException {
+      throw ApiException('Сервер не отвечает');
+    } catch (_) {
+      throw ApiException('Нет соединения с сервером');
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ApiException('Ошибка загрузки серверов (${response.statusCode})');
+    }
+
+    return _decodeBody(response.body);
+  }
+
+  static List<String> _extractAppUrls(dynamic decoded) {
+    final values = <String>{};
+    void collect(dynamic value) {
+      if (value == null) return;
+      final text = value.toString().trim();
+      if (text.isNotEmpty) values.add(text);
+    }
+
+    void collectFromMap(Map map) {
+      collect(map['appUrl']);
+      collect(map['app_url']);
+      collect(map['appURL']);
+      for (final key in const ['subscription', 'data', 'meta']) {
+        final nested = map[key];
+        if (nested is Map) collectFromMap(nested);
+      }
+      for (final key in const [
+        'servers',
+        'items',
+        'configs',
+        'trial_servers',
+        'free_servers',
+      ]) {
+        final nested = map[key];
+        if (nested is List) {
+          for (final item in nested) {
+            if (item is Map) collectFromMap(item);
+          }
+        }
+      }
+    }
+
+    if (decoded is Map) collectFromMap(decoded);
+    return values.toList(growable: false);
   }
 }
 

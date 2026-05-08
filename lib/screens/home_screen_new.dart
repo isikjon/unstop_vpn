@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -21,7 +22,7 @@ class HomeScreenNew extends ConsumerStatefulWidget {
 
 class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   bool _showTrialBanner = true;
-  bool _showConnectedPreview = false;
+  bool _vpnPermissionHintShown = false;
   Timer? _trialTimer;
   Duration _connectedFor = Duration.zero;
 
@@ -39,9 +40,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
 
   void _startTrialTimer() {
     _trialTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      final isConnected =
-          _showConnectedPreview ||
-          ref.read(vpnProvider).status == VpnStatus.connected;
+      final isConnected = ref.read(vpnProvider).status == VpnStatus.connected;
       setState(() {
         _connectedFor = isConnected
             ? _connectedFor + const Duration(seconds: 1)
@@ -61,7 +60,20 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   Widget build(BuildContext context) {
     final vpnState = ref.watch(vpnProvider);
     final isConnected =
-        _showConnectedPreview || vpnState.status == VpnStatus.connected;
+        vpnState.status == VpnStatus.connected ||
+        vpnState.status == VpnStatus.connecting;
+
+    ref.listen<VpnState>(vpnProvider, (previous, next) {
+      final error = next.lastError;
+      if (error == null || error == previous?.lastError || !mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error),
+          backgroundColor: const Color(0xFF12182C),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    });
 
     return Stack(
       children: [
@@ -71,7 +83,25 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
             fit: BoxFit.cover,
           ),
         ),
-        SafeArea(child: _buildHomeContent(isConnected)),
+        SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final contentHeight = math.max(
+                constraints.maxHeight,
+                isConnected ? 690.0 : 760.0,
+              );
+              return SingleChildScrollView(
+                physics: contentHeight > constraints.maxHeight
+                    ? const BouncingScrollPhysics()
+                    : const NeverScrollableScrollPhysics(),
+                child: SizedBox(
+                  height: contentHeight,
+                  child: _buildHomeContent(isConnected),
+                ),
+              );
+            },
+          ),
+        ),
       ],
     );
   }
@@ -169,7 +199,6 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
     return GestureDetector(
       onTap: () {
         setState(() {
-          _showConnectedPreview = false;
           _connectedFor = Duration.zero;
         });
         ref.read(vpnProvider.notifier).disconnect();
@@ -370,15 +399,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
 
   Widget _buildPowerButton({required bool enabled}) {
     return GestureDetector(
-      onTap: enabled
-          ? () {
-              setState(() {
-                _showConnectedPreview = true;
-                _connectedFor = Duration.zero;
-              });
-              ref.read(vpnProvider.notifier).toggleConnection();
-            }
-          : null,
+      onTap: enabled ? _handlePowerTap : null,
       child: Opacity(
         opacity: enabled ? 1 : 0.45,
         child: SvgPicture.asset(
@@ -388,6 +409,58 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
         ),
       ),
     );
+  }
+
+  Future<void> _handlePowerTap() async {
+    final shouldContinue = await _showVpnPermissionHint();
+    if (!shouldContinue || !mounted) return;
+    setState(() => _connectedFor = Duration.zero);
+    await ref.read(vpnProvider.notifier).toggleConnection();
+  }
+
+  Future<bool> _showVpnPermissionHint() async {
+    if (_vpnPermissionHintShown) return true;
+    _vpnPermissionHintShown = true;
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0C0E20),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          'Разрешите VPN',
+          style: GoogleFonts.manrope(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        content: Text(
+          'Сейчас система попросит добавить VPN-конфигурацию. Нажмите «Разрешить», иначе подключение не запустится.',
+          style: GoogleFonts.manrope(
+            color: const Color(0xFFD2EEFF),
+            fontSize: 14,
+            height: 1.35,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Отмена',
+              style: GoogleFonts.manrope(color: const Color(0xFF628499)),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              'Продолжить',
+              style: GoogleFonts.manrope(color: const Color(0xFF00A2FF)),
+            ),
+          ),
+        ],
+      ),
+    );
+    return result ?? true;
   }
 
   Widget _buildVpnControlBlock(bool isConnected) {

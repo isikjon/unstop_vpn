@@ -12,7 +12,7 @@ class AppConfig {
 
   /// Telegram bot username (without @). Used for deep links and
   /// "open bot" buttons throughout the app.
-  static const String botUsername = 'unstop_vpn_bot';
+  static const String botUsername = 'unstop_auth_bot';
 
   /// Direct deep link to the bot — opens Telegram if installed.
   static String get botDeepLink => 'https://t.me/$botUsername';

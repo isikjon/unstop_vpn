@@ -7,11 +7,13 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/auth_provider.dart';
+import '../providers/subscription_provider.dart';
 import '../providers/trial_provider.dart';
 import '../screens/main_shell.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/inset_shadow.dart';
+import '../widgets/shared_hero_background.dart';
 
 class AuthScreen extends ConsumerStatefulWidget {
   final bool showBottomNav;
@@ -106,6 +108,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         await ref
             .read(authProvider.notifier)
             .setVerifiedId(result.telegramId!, name: result.name);
+        await ref.read(subscriptionProvider.notifier).refresh();
         if (!mounted) return;
         Navigator.of(context).pushReplacementNamed('/home');
         return;
@@ -170,23 +173,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         child: Stack(
           children: [
             const Positioned.fill(child: ColoredBox(color: Color(0xFF000214))),
-            Positioned.fill(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  return Align(
-                    alignment: Alignment.topCenter,
-                    child: SizedBox(
-                      width: constraints.maxWidth * 0.84,
-                      child: Image.asset(
-                        '$_authAssets/auth_screen_bg.png',
-                        fit: BoxFit.fitWidth,
-                        alignment: Alignment.topCenter,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
+            const SharedHeroBackground(),
             SafeArea(
               bottom: false,
               child: Column(
@@ -194,27 +181,25 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                   const SizedBox(height: 16),
                   _header(),
                   const Spacer(),
-                  Container(
-                    width: double.infinity,
-                    padding: EdgeInsets.only(
-                      top: 24,
-                      bottom: keyboard > 0 ? keyboard + 18 : bottomGap,
-                    ),
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF000214),
-                      border: Border(
-                        top: BorderSide(color: Color(0xFF0F1628), width: 1),
+                  ClipPath(
+                    clipper: const _TopArcClipper(),
+                    child: Container(
+                      width: double.infinity,
+                      padding: EdgeInsets.only(
+                        top: 54,
+                        bottom: keyboard > 0 ? keyboard + 18 : bottomGap,
                       ),
-                    ),
-                    child: AnimatedPadding(
-                      duration: const Duration(milliseconds: 220),
-                      curve: Curves.easeOut,
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: AnimatedSwitcher(
+                      color: const Color(0xFF000214),
+                      child: AnimatedPadding(
                         duration: const Duration(milliseconds: 220),
-                        switchInCurve: Curves.easeOut,
-                        switchOutCurve: Curves.easeIn,
-                        child: _buildCurrentStep(),
+                        curve: Curves.easeOut,
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 220),
+                          switchInCurve: Curves.easeOut,
+                          switchOutCurve: Curves.easeIn,
+                          child: _buildCurrentStep(),
+                        ),
                       ),
                     ),
                   ),
@@ -565,4 +550,23 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$hours:$minutes:$seconds';
   }
+}
+
+class _TopArcClipper extends CustomClipper<Path> {
+  static const double _height = 38;
+
+  const _TopArcClipper();
+
+  @override
+  Path getClip(Size size) {
+    return Path()
+      ..moveTo(0, _height)
+      ..quadraticBezierTo(size.width / 2, 0, size.width, _height)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+  }
+
+  @override
+  bool shouldReclip(covariant _TopArcClipper oldClipper) => false;
 }

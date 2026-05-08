@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -42,6 +44,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final auth = ref.watch(authProvider);
     final subscription = ref.watch(subscriptionProvider).subscription;
     final tunnel = ref.watch(tunnelSettingsProvider);
+    final media = MediaQuery.of(context);
+    final availableHeight =
+        media.size.height - media.padding.top - media.padding.bottom - 92;
+    final contentHeight = math.max(availableHeight, 840.0);
 
     return Scaffold(
       backgroundColor: const Color(0xFF000214),
@@ -68,11 +74,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
               padding: EdgeInsets.zero,
               children: [
                 SizedBox(
-                  height:
-                      MediaQuery.of(context).size.height -
-                      MediaQuery.of(context).padding.top -
-                      MediaQuery.of(context).padding.bottom -
-                      92,
+                  height: contentHeight,
                   child: Column(
                     children: [
                       const SizedBox(height: 16),
@@ -291,7 +293,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Container(
-        height: 84,
+        height: 76,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: const Color(0xFF11A9F4),
@@ -301,15 +303,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           children: [
             Positioned.fill(child: InsetShadow(borderRadius: radius)),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 14),
               child: Row(
                 children: [
                   SvgPicture.asset(
                     'assets/icons/padpiska.svg',
-                    width: 36,
-                    height: 36,
+                    width: 30,
+                    height: 30,
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -321,19 +323,19 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.onest(
                             color: Colors.white,
-                            fontSize: 17,
+                            fontSize: 15,
                             fontWeight: FontWeight.w700,
                             height: 1.15,
                           ),
                         ),
-                        const SizedBox(height: 7),
+                        const SizedBox(height: 6),
                         Text(
                           _formatActiveUntil(subscription.expiresAt),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.onest(
                             color: const Color(0xFFD2EEFF),
-                            fontSize: 15,
+                            fontSize: 14,
                             fontWeight: FontWeight.w400,
                             height: 1.15,
                           ),
@@ -341,13 +343,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   GestureDetector(
                     onTap: _openSubscriptionBot,
                     behavior: HitTestBehavior.opaque,
                     child: Container(
-                      width: 104,
-                      height: 48,
+                      width: 96,
+                      height: 44,
                       decoration: BoxDecoration(
                         color: const Color(0xFF06081A),
                         borderRadius: BorderRadius.circular(16),
@@ -357,7 +359,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           'Продлить',
                           style: GoogleFonts.onest(
                             color: Colors.white,
-                            fontSize: 16,
+                            fontSize: 15,
                             fontWeight: FontWeight.w400,
                             height: 1.0,
                           ),

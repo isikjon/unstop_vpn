@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../providers/auth_provider.dart';
+import '../providers/subscription_provider.dart';
 import '../theme/app_theme.dart';
 import 'auth_screen.dart';
 import 'home_screen_new.dart';
@@ -30,6 +31,13 @@ class _MainShellState extends ConsumerState<MainShell> {
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex.clamp(0, _screens.length - 1);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final auth = ref.read(authProvider);
+      if (auth.isAuthenticated) {
+        ref.read(subscriptionProvider.notifier).refresh();
+      }
+    });
   }
 
   @override

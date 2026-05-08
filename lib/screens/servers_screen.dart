@@ -80,7 +80,10 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
                   _buildServersLoadingCard(),
                   const SizedBox(height: 18),
                 ] else ...[
-                  _buildNoServersCard(trial.isExpired),
+                  _buildNoServersCard(
+                    trial.isExpired,
+                    subState.subscription.userFacingError,
+                  ),
                   const SizedBox(height: 18),
                 ],
                 if (!subState.subscription.isActive)
@@ -197,7 +200,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
 
   Widget _buildServerList(List<VpnServer> servers) {
     final selectedUrl =
-        ref.watch(subscriptionProvider).selectedServer?.url ??
+        ref.watch(subscriptionProvider).effectiveServer?.url ??
         servers.first.url;
     return Column(
       children: [
@@ -347,7 +350,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
     );
   }
 
-  Widget _buildNoServersCard(bool trialExpired) {
+  Widget _buildNoServersCard(bool trialExpired, String? error) {
     return Container(
       height: 80,
       padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -364,7 +367,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
             child: Text(
               trialExpired
                   ? 'Пробный период истёк'
-                  : 'Пробный сервер не получен от API',
+                  : error ?? 'Пробный сервер не получен от API',
               style: GoogleFonts.manrope(
                 fontSize: 15,
                 color: const Color(0xFF628499),

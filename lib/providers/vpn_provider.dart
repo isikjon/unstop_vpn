@@ -155,9 +155,10 @@ class VpnNotifier extends Notifier<VpnState> {
 
     final server = ref.read(subscriptionProvider).effectiveServer;
     if (server == null) {
+      final error = subscription.userFacingError;
       state = state.copyWith(
         status: VpnStatus.error,
-        lastError: 'Нет доступных серверов. Проверьте подписку.',
+        lastError: error ?? 'Нет доступных серверов. Проверьте подписку.',
       );
       return;
     }
