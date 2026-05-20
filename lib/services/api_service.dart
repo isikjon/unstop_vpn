@@ -19,54 +19,85 @@ class ApiService {
     String telegramId,
   ) async {
     final uri = Uri.parse('${AppConfig.apiBase}/app/$telegramId');
-    http.Response response;
     Map<String, String> headers;
     try {
       headers = await DeviceHeadersService.apiHeaders();
-      response = await http
-          .get(uri, headers: headers)
-          .timeout(AppConfig.apiTimeout);
-    } on TimeoutException {
-      throw ApiException('Сервер не отвечает');
     } catch (e) {
-      throw ApiException('Нет соединения с сервером');
+      throw ApiException('Ошибка подготовки устройства');
     }
 
-    switch (response.statusCode) {
-      case 200:
-        break;
-      case 401:
-      case 403:
-        throw ApiException(
-          'Доступ запрещён (${response.statusCode}). '
-          'Убедитесь, что вы зарегистрированы в боте '
-          '@${AppConfig.botUsername}.',
-        );
-      case 404:
-        // Treat a plain 404 as "no subscription", but still accept
-        // trial/free server payloads if backend returns them with 404.
-        final decoded404 = _decodeBody(response.body);
-        final fallback = Subscription.fromAny(decoded404);
-        return SubscriptionFetchResult(
-          subscription: fallback.servers.isEmpty
-              ? Subscription.empty
-              : fallback,
-          rawPayload: response.body,
-        );
-      default:
-        if (response.statusCode >= 500) {
-          throw ApiException('Ошибка сервера (${response.statusCode})');
-        }
-        throw ApiException('Неожиданный ответ (${response.statusCode})');
-    }
+    const maxAttempts = 3;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      http.Response response;
+      try {
+        response = await http
+            .get(uri, headers: headers)
+            .timeout(AppConfig.apiTimeout);
+      } on TimeoutException {
+        throw ApiException('Сервер не отвечает');
+      } catch (e) {
+        throw ApiException('Нет соединения с сервером');
+      }
 
-    final body = response.body;
-    var decoded = _decodeBody(body);
-    decoded = await _resolveAppUrlIfNeeded(decoded, headers);
+      final body = response.body;
+      final decodedBody = _decodeBody(body);
+
+      switch (response.statusCode) {
+        case 200:
+          break;
+        case 401:
+        case 403:
+          throw ApiException(
+            'Доступ запрещён (${response.statusCode}). '
+            'Убедитесь, что вы зарегистрированы в боте '
+            '@${AppConfig.botUsername}.',
+          );
+        case 404:
+          // Treat a plain 404 as "no subscription", but still accept
+          // trial/free server payloads if backend returns them with 404.
+          final fallback = Subscription.fromAny(decodedBody);
+          return SubscriptionFetchResult(
+            subscription: fallback.servers.isEmpty
+                ? Subscription.empty
+                : fallback,
+            rawPayload: body,
+          );
+        default:
+          final fallback = Subscription.fromAny(decodedBody);
+          if (fallback.isActive ||
+              fallback.isDeviceLimitExceeded ||
+              fallback.servers.isNotEmpty) {
+            return SubscriptionFetchResult(
+              subscription: fallback,
+              rawPayload: body,
+            );
+          }
+          if (response.statusCode >= 500) {
+            throw ApiException('Ошибка сервера (${response.statusCode})');
+          }
+          throw ApiException('Неожиданный ответ (${response.statusCode})');
+      }
+
+      var decoded = decodedBody;
+      decoded = await _resolveAppUrlIfNeeded(decoded, headers);
+
+      if (_isRetryableSubscriptionPayload(decoded) &&
+          attempt < maxAttempts - 1) {
+        await Future<void>.delayed(Duration(milliseconds: 700 * (attempt + 1)));
+        continue;
+      }
+
+      return SubscriptionFetchResult(
+        subscription: Subscription.fromAny(decoded),
+        rawPayload: body,
+      );
+    }
 
     return SubscriptionFetchResult(
-      subscription: Subscription.fromAny(decoded),
-      rawPayload: body,
+      subscription: Subscription.empty.copyWith(
+        errorMessage: 'subscription_payload_not_loaded',
+      ),
+      rawPayload: '',
     );
   }
 
@@ -169,6 +200,13 @@ class ApiService {
 
     if (decoded is Map) collectFromMap(decoded);
     return values.toList(growable: false);
+  }
+
+  static bool _isRetryableSubscriptionPayload(dynamic decoded) {
+    if (decoded is! Map) return false;
+    final message = decoded['message']?.toString().trim().toLowerCase();
+    return message == 'subscription_payload_empty' ||
+        message == 'subscription_payload_not_loaded';
   }
 }
 

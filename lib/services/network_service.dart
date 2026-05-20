@@ -12,15 +12,25 @@ class IpInfo {
 class NetworkService {
   static Future<IpInfo?> fetchCurrentIp() async {
     try {
-      // ip-api.com — бесплатный сервис, возвращает IP + геолокацию
-      final response = await http.get(
-        Uri.parse('http://ip-api.com/json/?fields=query,country,city'),
-      ).timeout(const Duration(seconds: 10));
+      final ipResponse = await http
+          .get(Uri.parse('https://api4.ipify.org?format=json'))
+          .timeout(const Duration(seconds: 8));
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      if (ipResponse.statusCode == 200) {
+        final ipData = jsonDecode(ipResponse.body) as Map<String, dynamic>;
+        final ip = ipData['ip']?.toString();
+        if (ip == null || ip.isEmpty) return null;
+
+        final locationResponse = await http
+            .get(Uri.parse('https://ipwho.is/$ip'))
+            .timeout(const Duration(seconds: 8));
+        if (locationResponse.statusCode != 200) {
+          return IpInfo(ip: ip);
+        }
+
+        final data = jsonDecode(locationResponse.body) as Map<String, dynamic>;
         return IpInfo(
-          ip: data['query'] ?? '—',
+          ip: ip,
           country: data['country'] ?? '',
           city: data['city'] ?? '',
         );
@@ -31,9 +41,9 @@ class NetworkService {
 
   static Future<bool> checkInternetConnection() async {
     try {
-      final response = await http.get(
-        Uri.parse('https://www.google.com/generate_204'),
-      ).timeout(const Duration(seconds: 5));
+      final response = await http
+          .get(Uri.parse('https://www.google.com/generate_204'))
+          .timeout(const Duration(seconds: 5));
       return response.statusCode == 204 || response.statusCode == 200;
     } catch (_) {
       return false;

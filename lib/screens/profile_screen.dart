@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -15,6 +13,8 @@ import '../providers/subscription_provider.dart';
 import '../providers/trial_provider.dart';
 import '../providers/vpn_provider.dart';
 import '../theme/app_theme.dart';
+import '../utils/subscription_flow.dart';
+import '../widgets/app_header.dart';
 import '../widgets/inset_shadow.dart';
 import '../widgets/subscription_status_badge.dart';
 
@@ -39,15 +39,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     }
   }
 
+  Future<void> _refreshProfile() async {
+    await ref.read(subscriptionProvider.notifier).refresh(force: true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
     final subscription = ref.watch(subscriptionProvider).subscription;
     final tunnel = ref.watch(tunnelSettingsProvider);
-    final media = MediaQuery.of(context);
-    final availableHeight =
-        media.size.height - media.padding.top - media.padding.bottom - 92;
-    final contentHeight = math.max(availableHeight, 840.0);
 
     return Scaffold(
       backgroundColor: const Color(0xFF000214),
@@ -70,14 +70,17 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           ),
           Positioned.fill(child: CustomPaint(painter: _ProfileArcPainter())),
           SafeArea(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                SizedBox(
-                  height: contentHeight,
-                  child: Column(
+            child: RefreshIndicator(
+              color: AppColors.primary,
+              backgroundColor: AppColors.bgCard,
+              onRefresh: _refreshProfile,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.symmetric(vertical: 15),
+                children: [
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const SizedBox(height: 16),
                       _header(subscription),
                       const SizedBox(height: 48),
                       _identity(auth),
@@ -89,15 +92,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         title: 'Free Proxy',
                         subtitle: 'Бесплатное прокси для Telegram',
                         trailing: _arrowButton(),
-                        onTap: _openSupport,
+                        onTap: _openProxy,
                       ),
                       _settingsRow(
                         icon: '$_settingsAssets/obnovit_podpisku.svg',
                         title: 'Обновить подписку',
                         subtitle: 'Проверка подписки',
                         trailing: _refreshButton(),
-                        onTap: () =>
-                            ref.read(subscriptionProvider.notifier).refresh(),
+                        onTap: _refreshProfile,
                       ),
                       _settingsRow(
                         icon: '$_settingsAssets/fragmentirovaniya.svg',
@@ -130,13 +132,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         trailing: _arrowButton(),
                         onTap: _openSupport,
                       ),
-                      const Spacer(),
+                      const SizedBox(height: 24),
                       _logoutButton(),
-                      const SizedBox(height: 18),
                     ],
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ],
@@ -145,17 +146,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   }
 
   Widget _header(Subscription subscription) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Image.asset('assets/images/logo.png', height: 24),
-          SubscriptionStatusBadge(
-            subscription: subscription,
-            trialLeft: ref.watch(trialProvider).timeLeft,
-          ),
-        ],
+    return AppHeader(
+      trailing: SubscriptionStatusBadge(
+        subscription: subscription,
+        trialLeft: ref.watch(trialProvider).timeLeft,
       ),
     );
   }
@@ -184,8 +178,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           children: [
             SvgPicture.asset(
               '$_settingsAssets/telegram.svg',
-              width: 18,
-              height: 18,
+              width: 48,
+              height: 48,
             ),
             const SizedBox(width: 8),
             Text(
@@ -271,7 +265,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         onTap: _openSubscriptionBot,
                         child: Center(
                           child: Text(
-                            'Купить подписку',
+                            'Авторизоваться',
                             style: AppTextStyles.button.copyWith(fontSize: 15),
                           ),
                         ),
@@ -289,6 +283,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   Widget _activeSubscriptionCard(Subscription subscription) {
     final radius = BorderRadius.circular(24);
+    final title = subscription.isGracePeriod
+        ? 'Доп. доступ активен'
+        : 'Подписка активна';
+    final subtitle = subscription.isGracePeriod
+        ? 'доступен один сервер'
+        : _formatActiveUntil(subscription.expiresAt);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -318,7 +318,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Подписка активна',
+                          title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.onest(
@@ -330,7 +330,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          _formatActiveUntil(subscription.expiresAt),
+                          subtitle,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.onest(
@@ -356,7 +356,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                       ),
                       child: Center(
                         child: Text(
-                          'Продлить',
+                          'Управлять',
                           style: GoogleFonts.onest(
                             color: Colors.white,
                             fontSize: 15,
@@ -559,10 +559,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   }
 
   Future<void> _openSubscriptionBot() async {
-    final uri = Uri.parse(AppConfig.botDeepLink);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
+    await openSubscriptionFlow(context, ref);
   }
 
   Future<void> _openSupport() async {
@@ -572,8 +569,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     }
   }
 
+  Future<void> _openProxy() async {
+    final uri = Uri.parse(AppConfig.proxyLink);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
   String _formatActiveUntil(DateTime? date) {
-    if (date == null) return 'до 15 мая, 16:22';
+    if (date == null) return 'активна';
     final local = date.toLocal();
     return 'до ${local.day} ${_monthName(local.month)}, '
         '${local.hour.toString().padLeft(2, '0')}:'

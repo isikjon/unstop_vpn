@@ -5,10 +5,7 @@ import 'package:flutter/material.dart';
 class InsetShadow extends StatelessWidget {
   final BorderRadius borderRadius;
 
-  const InsetShadow({
-    super.key,
-    required this.borderRadius,
-  });
+  const InsetShadow({super.key, required this.borderRadius});
 
   @override
   Widget build(BuildContext context) {
@@ -38,10 +35,7 @@ class _InsetShadowPainter extends CustomPainter {
       ..shader = ui.Gradient.linear(
         const Offset(0, 0),
         const Offset(0, 10),
-        const [
-          Color(0x40FFFFFF),
-          Color(0x00FFFFFF),
-        ],
+        const [Color(0x40FFFFFF), Color(0x00FFFFFF)],
       );
     canvas.drawRect(Rect.fromLTWH(0, 0, size.width, 10), topPaint);
 
@@ -49,22 +43,15 @@ class _InsetShadowPainter extends CustomPainter {
       ..shader = ui.Gradient.linear(
         const Offset(0, 0),
         const Offset(10, 0),
-        const [
-          Color(0x40FFFFFF),
-          Color(0x00FFFFFF),
-        ],
+        const [Color(0x40FFFFFF), Color(0x00FFFFFF)],
       );
     canvas.drawRect(Rect.fromLTWH(0, 0, 10, size.height), leftPaint);
 
     final cornerPaint = Paint()
-      ..shader = ui.Gradient.radial(
-        const Offset(0, 0),
-        30,
-        const [
-          Color(0x40FFFFFF),
-          Color(0x00FFFFFF),
-        ],
-      );
+      ..shader = ui.Gradient.radial(const Offset(0, 0), 30, const [
+        Color(0x40FFFFFF),
+        Color(0x00FFFFFF),
+      ]);
     canvas.drawRect(Rect.fromLTWH(0, 0, 32, 32), cornerPaint);
 
     canvas.restore();

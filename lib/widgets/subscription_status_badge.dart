@@ -25,7 +25,9 @@ class SubscriptionStatusBadge extends StatelessWidget {
 
   Widget _activeBadge() {
     final days = subscription.daysLeft;
-    final text = days == null ? 'АКТИВНА' : '$days ДНЕЙ';
+    final text = subscription.isGracePeriod
+        ? 'ДОСТУП'
+        : (days == null ? 'АКТИВНА' : '$days ДНЕЙ');
     final radius = BorderRadius.circular(16);
 
     return Container(

@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart';
 
 import '../config/app_config.dart';
 import 'secure_storage.dart';
@@ -9,6 +10,24 @@ import 'secure_storage.dart';
 class DeviceHeadersService {
   static final _random = Random.secure();
   static final _deviceInfo = DeviceInfoPlugin();
+  static Future<String>? _installIdFuture;
+
+  @visibleForTesting
+  static Future<String?> Function()? debugReadInstallId;
+
+  @visibleForTesting
+  static Future<void> Function(String id)? debugSaveInstallId;
+
+  @visibleForTesting
+  static Future<String?> Function()? debugStablePlatformId;
+
+  @visibleForTesting
+  static void resetForTesting() {
+    _installIdFuture = null;
+    debugReadInstallId = null;
+    debugSaveInstallId = null;
+    debugStablePlatformId = null;
+  }
 
   static Future<Map<String, String>> apiHeaders({
     bool includeJsonContentType = true,
@@ -63,13 +82,47 @@ class DeviceHeadersService {
     );
   }
 
-  static Future<String> _installId() async {
-    final saved = await VpnSecureStorage.getInstallId();
-    if (saved != null && saved.isNotEmpty) return saved;
+  static Future<String> _installId() {
+    return _installIdFuture ??= _readOrCreateInstallId();
+  }
 
-    final id = _uuidV4();
-    await VpnSecureStorage.saveInstallId(id);
+  static Future<String> _readOrCreateInstallId() async {
+    final saved = _normalizeInstallId(await _readInstallId());
+    if (saved != null) return saved;
+
+    final id =
+        _normalizeInstallId(await _stablePlatformInstallId()) ?? _uuidV4();
+    await _saveInstallId(id);
     return id;
+  }
+
+  static Future<String?> _readInstallId() {
+    final override = debugReadInstallId;
+    return override == null ? VpnSecureStorage.getInstallId() : override();
+  }
+
+  static Future<void> _saveInstallId(String id) {
+    final override = debugSaveInstallId;
+    return override == null ? VpnSecureStorage.saveInstallId(id) : override(id);
+  }
+
+  static Future<String?> _stablePlatformInstallId() async {
+    final override = debugStablePlatformId;
+    if (override != null) return override();
+
+    if (!Platform.isIOS) return null;
+    try {
+      final info = await _deviceInfo.iosInfo;
+      return info.identifierForVendor;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String? _normalizeInstallId(String? value) {
+    final normalized = value?.trim().toLowerCase();
+    if (normalized == null || normalized.isEmpty) return null;
+    return normalized;
   }
 
   static String _uuidV4() {

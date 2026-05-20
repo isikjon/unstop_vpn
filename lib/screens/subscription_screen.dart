@@ -4,12 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:url_launcher/url_launcher.dart';
-import '../config/app_config.dart';
 import '../providers/subscription_provider.dart';
 import '../providers/trial_provider.dart';
 import '../models/subscription.dart';
 import '../theme/app_theme.dart';
+import '../utils/subscription_flow.dart';
+import '../widgets/app_header.dart';
 import '../widgets/inset_shadow.dart';
 import '../widgets/subscription_status_badge.dart';
 
@@ -71,7 +71,8 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     return RefreshIndicator(
       color: AppColors.primary,
       backgroundColor: AppColors.bgCard,
-      onRefresh: () => ref.read(subscriptionProvider.notifier).refresh(),
+      onRefresh: () =>
+          ref.read(subscriptionProvider.notifier).refresh(force: true),
       child: Stack(
         children: [
           const Positioned.fill(child: ColoredBox(color: Color(0xFF000214))),
@@ -86,7 +87,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                 SizedBox(
                   height: contentHeight,
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 16, 14, 20),
+                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 20),
                     child: Column(
                       children: [
                         _activeHeader(subState.subscription),
@@ -109,15 +110,12 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   }
 
   Widget _activeHeader(Subscription subscription) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Image.asset('assets/images/logo.png', height: 24),
-        SubscriptionStatusBadge(
-          subscription: subscription,
-          trialLeft: ref.watch(trialProvider).timeLeft,
-        ),
-      ],
+    return AppHeader(
+      padding: EdgeInsets.zero,
+      trailing: SubscriptionStatusBadge(
+        subscription: subscription,
+        trialLeft: ref.watch(trialProvider).timeLeft,
+      ),
     );
   }
 
@@ -157,6 +155,12 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
 
   Widget _activeSubscriptionBanner(Subscription subscription) {
     final radius = BorderRadius.circular(24);
+    final title = subscription.isGracePeriod
+        ? 'Доп. доступ активен'
+        : 'Подписка активна';
+    final subtitle = subscription.isGracePeriod
+        ? 'доступен один сервер'
+        : _formatActiveUntil(subscription.expiresAt);
 
     return Container(
       height: 92,
@@ -184,7 +188,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Подписка активна',
+                        title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.manrope(
@@ -196,7 +200,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        _formatActiveUntil(subscription.expiresAt),
+                        subtitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.manrope(
@@ -211,7 +215,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                 ),
                 const SizedBox(width: 12),
                 GestureDetector(
-                  onTap: _openSubscriptionBot,
+                  onTap: _handleSubscribeTap,
                   behavior: HitTestBehavior.opaque,
                   child: Container(
                     width: 120,
@@ -222,7 +226,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                     ),
                     child: Center(
                       child: Text(
-                        'Продлить',
+                        'Управлять',
                         style: GoogleFonts.manrope(
                           fontSize: 16,
                           color: Colors.white,
@@ -247,7 +251,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   }
 
   String _formatActiveUntil(DateTime? date) {
-    if (date == null) return 'до 15 мая, 16:22';
+    if (date == null) return 'активна';
     final local = date.toLocal();
     return 'до ${local.day} ${_monthName(local.month)}, '
         '${local.hour.toString().padLeft(2, '0')}:'
@@ -275,38 +279,88 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   Widget _noSubscriptionBody(BuildContext context) {
     return Stack(
       children: [
-        const Positioned.fill(child: ColoredBox(color: Color(0xFF000214))),
+        const Positioned.fill(child: ColoredBox(color: Color(0xFF06081A))),
         Positioned.fill(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return Align(
-                alignment: Alignment.topCenter,
-                child: SizedBox(
-                  width: constraints.maxWidth * 0.9,
-                  child: Image.asset(
-                    'assets/images/no_subscription_bg.png',
-                    fit: BoxFit.fitWidth,
-                    alignment: Alignment.topCenter,
+          child: SafeArea(
+            bottom: false,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                const posterAspectRatio = 728 / 1173;
+                const headerTopOffset = 16.0;
+                const headerHeight = 44.0;
+                const gapAfterHeader = 14.0;
+                const buttonHeight = 58.0;
+                const buttonBottomOffset = 18.0;
+                const gapBeforeButton = 22.0;
+
+                const posterTop =
+                    headerTopOffset + headerHeight + gapAfterHeader;
+                const posterBottom =
+                    buttonHeight + buttonBottomOffset + gapBeforeButton;
+                final posterMaxHeight = math.max(
+                  constraints.maxHeight - posterTop - posterBottom,
+                  0.0,
+                );
+                final posterWidth = math.min(
+                  constraints.maxWidth * 0.92,
+                  posterMaxHeight * posterAspectRatio,
+                );
+
+                return Align(
+                  alignment: Alignment.topCenter,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: posterTop),
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: SizedBox(
+                        width: posterWidth,
+                        height: posterWidth / posterAspectRatio,
+                        child: Image.asset(
+                          'assets/images/subscription_no_auth_bg.png',
+                          fit: BoxFit.contain,
+                          alignment: Alignment.topCenter,
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           ),
         ),
         SafeArea(
-          child: Column(
-            children: [
-              const SizedBox(height: 16),
-              _noSubscriptionHeader(),
-              const Spacer(),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: _subscribeButton(
-                  enabled: !ref.watch(trialProvider).isExpired,
-                ),
-              ),
-              const SizedBox(height: 18),
-            ],
+          child: RefreshIndicator(
+            color: AppColors.primary,
+            backgroundColor: AppColors.bgCard,
+            onRefresh: () =>
+                ref.read(subscriptionProvider.notifier).refresh(force: true),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
+                  children: [
+                    SizedBox(
+                      height: constraints.maxHeight,
+                      child: Column(
+                        children: [
+                          const SizedBox(height: 16),
+                          _noSubscriptionHeader(),
+                          const Spacer(),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: _subscribeButton(
+                              enabled: !ref.watch(trialProvider).isExpired,
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ],
@@ -314,17 +368,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   }
 
   Widget _noSubscriptionHeader() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Image.asset('assets/images/logo.png', height: 24),
-          SubscriptionStatusBadge(
-            subscription: ref.watch(subscriptionProvider).subscription,
-            trialLeft: ref.watch(trialProvider).timeLeft,
-          ),
-        ],
+    return AppHeader(
+      trailing: SubscriptionStatusBadge(
+        subscription: ref.watch(subscriptionProvider).subscription,
+        trialLeft: ref.watch(trialProvider).timeLeft,
       ),
     );
   }
@@ -338,10 +385,26 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
           Positioned.fill(
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: enabled
-                    ? const Color(0xFF11A9F4)
-                    : const Color(0xFF172134),
+                color: enabled ? null : const Color(0xFF172134),
+                gradient: enabled
+                    ? const LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Color(0xFF18B7FF), Color(0xFF00A2FF)],
+                      )
+                    : null,
                 borderRadius: BorderRadius.circular(16),
+                boxShadow: enabled
+                    ? [
+                        BoxShadow(
+                          color: const Color(
+                            0xFF00A2FF,
+                          ).withValues(alpha: 0.24),
+                          blurRadius: 20,
+                          offset: const Offset(0, 10),
+                        ),
+                      ]
+                    : null,
               ),
             ),
           ),
@@ -353,9 +416,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
               color: Colors.transparent,
               child: InkWell(
                 borderRadius: BorderRadius.circular(16),
-                onTap: enabled ? _openSubscriptionBot : null,
+                onTap: enabled ? _handleSubscribeTap : null,
                 child: Center(
-                  child: Text('Оформить подписку', style: AppTextStyles.button),
+                  child: Text('Авторизоваться', style: AppTextStyles.button),
                 ),
               ),
             ),
@@ -365,12 +428,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     );
   }
 
-  Future<void> _openSubscriptionBot() async {
-    final uri = Uri.parse(AppConfig.botDeepLink);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
-  }
+  Future<void> _handleSubscribeTap() => openSubscriptionFlow(context, ref);
 }
 
 class _LimitCard extends StatelessWidget {

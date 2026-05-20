@@ -1,7 +1,1 @@
-enum VpnStatus {
-  idle,
-  connecting,
-  connected,
-  error,
-  reconnecting,
-}
+enum VpnStatus { idle, connecting, connected, error, reconnecting }

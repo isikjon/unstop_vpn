@@ -24,9 +24,33 @@ class ServerDisplay {
     return ServerDisplay(
       flag: server.flag,
       country: server.country,
-      subtitle: server.city.isNotEmpty ? server.city : server.address,
+      subtitle: _safeServerSubtitle(server),
     );
   }
+}
+
+String _safeServerSubtitle(VpnServer server) {
+  final city = server.city.trim();
+  if (city.isNotEmpty && !_containsNetworkAddress(city)) return city;
+
+  if (VpnServer.isRawXrayConfig(server.url)) return 'Xray';
+
+  final scheme = Uri.tryParse(server.url)?.scheme.toLowerCase();
+  return switch (scheme) {
+    'vless' => 'VLESS',
+    'vmess' => 'VMess',
+    'trojan' => 'Trojan',
+    'ss' => 'Shadowsocks',
+    'socks' => 'SOCKS',
+    _ => 'VPN сервер',
+  };
+}
+
+bool _containsNetworkAddress(String value) {
+  final text = value.trim().toLowerCase();
+  if (RegExp(r'\b\d{1,3}(\.\d{1,3}){3}\b').hasMatch(text)) return true;
+  if (RegExp(r'\b[a-z0-9-]+(\.[a-z0-9-]+)+\b').hasMatch(text)) return true;
+  return false;
 }
 
 final selectedServerDisplayProvider =
@@ -82,15 +106,19 @@ class SubscriptionState {
 
   /// Effective server: explicit selection > first available > null.
   VpnServer? get effectiveServer {
-    if (selectedServer != null && _isConnectableServer(selectedServer!)) {
+    if (selectedServer != null &&
+        _isConnectableServerForCurrentPlatform(selectedServer!)) {
       return selectedServer;
     }
     for (final server in subscription.servers) {
-      if (_isConnectableServer(server)) return server;
+      if (_isConnectableServerForCurrentPlatform(server)) return server;
     }
-    if (subscription.servers.isNotEmpty) return subscription.servers.first;
     return null;
   }
+}
+
+bool _isConnectableServerForCurrentPlatform(VpnServer server) {
+  return _isConnectableServer(server);
 }
 
 bool _isConnectableServer(VpnServer server) {
@@ -111,6 +139,7 @@ final subscriptionProvider =
 
 class SubscriptionNotifier extends Notifier<SubscriptionState> {
   Timer? _refreshTimer;
+  DateTime? _lastRefreshAt;
 
   @override
   SubscriptionState build() {
@@ -148,7 +177,13 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
     try {
       final decoded = jsonDecode(raw);
       final cached = Subscription.fromAny(decoded);
-      if (cached.servers.isEmpty && !cached.isActive) return;
+      if (cached.servers.isEmpty) {
+        if (!cached.isActive ||
+            (cached.expiresAt == null && cached.deviceLimitCount == null)) {
+          await VpnSecureStorage.clearCachedSubscriptionPayload();
+          return;
+        }
+      }
       final selected = await _restoreSelectedServer(cached);
       state = state.copyWith(
         subscription: cached,
@@ -161,21 +196,31 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
     }
   }
 
-  Future<void> refresh() async {
+  Future<void> refresh({bool force = false}) async {
     final auth = ref.read(authProvider);
     if (!auth.isAuthenticated) return;
+
+    final lastRefreshAt = _lastRefreshAt;
+    if (!force &&
+        lastRefreshAt != null &&
+        state.subscription != Subscription.empty &&
+        DateTime.now().difference(lastRefreshAt) <
+            AppConfig.subscriptionRefreshInterval) {
+      _scheduleNextRefresh();
+      return;
+    }
 
     state = state.copyWith(isLoading: true, clearError: true);
     try {
       final result = await ApiService.fetchSubscriptionResult(auth.telegramId!);
-      final sub = result.subscription;
+      final sub = await _mergeWithCachedDataIfNeeded(result.subscription);
       final selected = await _restoreSelectedServer(sub);
 
-      if (sub.servers.isNotEmpty || sub.isActive) {
+      if (sub.servers.isNotEmpty) {
         await VpnSecureStorage.saveCachedSubscriptionPayload(
           jsonEncode(sub.toCacheJson()),
         );
-      } else {
+      } else if (!sub.isActive) {
         await VpnSecureStorage.clearCachedSubscriptionPayload();
       }
 
@@ -184,12 +229,52 @@ class SubscriptionNotifier extends Notifier<SubscriptionState> {
         isLoading: false,
         selectedServer: selected,
       );
+      _lastRefreshAt = DateTime.now();
 
       _scheduleNextRefresh();
     } on ApiException catch (e) {
       state = state.copyWith(isLoading: false, error: e.message);
     } catch (e) {
       state = state.copyWith(isLoading: false, error: 'Ошибка: $e');
+    }
+  }
+
+  Future<Subscription> _mergeWithCachedDataIfNeeded(
+    Subscription incoming,
+  ) async {
+    if ((!incoming.isDeviceLimitExceeded && !incoming.isPayloadPending) ||
+        incoming.servers.isNotEmpty) {
+      return incoming;
+    }
+
+    final current = state.subscription;
+    if (current.servers.isNotEmpty || current.expiresAt != null) {
+      return current.copyWith(
+        isActive: true,
+        errorMessage: incoming.errorMessage,
+        deviceUsedCount: incoming.deviceUsedCount,
+        deviceLimitCount: incoming.deviceLimitCount,
+        trafficUsedBytes: incoming.trafficUsedBytes,
+        trafficLimitBytes: incoming.trafficLimitBytes,
+      );
+    }
+
+    final raw = await VpnSecureStorage.getCachedSubscriptionPayload();
+    if (raw == null || raw.trim().isEmpty) return incoming;
+
+    try {
+      final cached = Subscription.fromAny(jsonDecode(raw));
+      if (cached.servers.isEmpty && cached.expiresAt == null) return incoming;
+      return cached.copyWith(
+        isActive: true,
+        errorMessage: incoming.errorMessage,
+        deviceUsedCount: incoming.deviceUsedCount,
+        deviceLimitCount: incoming.deviceLimitCount,
+        trafficUsedBytes: incoming.trafficUsedBytes,
+        trafficLimitBytes: incoming.trafficLimitBytes,
+      );
+    } catch (_) {
+      return incoming;
     }
   }
 

@@ -136,6 +136,8 @@ class AuthNotifier extends Notifier<AuthState> {
     await VpnSecureStorage.clearPhone();
     await VpnSecureStorage.clearName();
     await VpnSecureStorage.clearCachedSubscriptionPayload();
+    await VpnSecureStorage.clearSelectedServerId();
+    await VpnSecureStorage.clearPinnedServerIds();
     state = const AuthState(step: AuthStep.idle);
   }
 }

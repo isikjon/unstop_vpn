@@ -1,5 +1,3 @@
-import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -8,9 +6,13 @@ import '../theme/app_theme.dart';
 import '../providers/vpn_provider.dart';
 import '../providers/subscription_provider.dart';
 import '../providers/trial_provider.dart';
+import '../models/subscription.dart';
 import '../models/vpn_status.dart';
+import '../widgets/app_header.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/inset_shadow.dart';
 import '../widgets/subscription_status_badge.dart';
+import '../utils/subscription_flow.dart';
 import 'servers_screen.dart';
 
 class HomeScreenNew extends ConsumerStatefulWidget {
@@ -23,30 +25,9 @@ class HomeScreenNew extends ConsumerStatefulWidget {
 class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   bool _showTrialBanner = true;
   bool _vpnPermissionHintShown = false;
-  Timer? _trialTimer;
-  Duration _connectedFor = Duration.zero;
 
-  @override
-  void initState() {
-    super.initState();
-    _startTrialTimer();
-  }
-
-  @override
-  void dispose() {
-    _trialTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startTrialTimer() {
-    _trialTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      final isConnected = ref.read(vpnProvider).status == VpnStatus.connected;
-      setState(() {
-        _connectedFor = isConnected
-            ? _connectedFor + const Duration(seconds: 1)
-            : Duration.zero;
-      });
-    });
+  Future<void> _refreshSubscription() async {
+    await ref.read(subscriptionProvider.notifier).refresh(force: true);
   }
 
   String _formatDuration(Duration d) {
@@ -59,19 +40,15 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   @override
   Widget build(BuildContext context) {
     final vpnState = ref.watch(vpnProvider);
-    final isConnected =
-        vpnState.status == VpnStatus.connected ||
-        vpnState.status == VpnStatus.connecting;
+    final isConnected = vpnState.status == VpnStatus.connected;
 
     ref.listen<VpnState>(vpnProvider, (previous, next) {
       final error = next.lastError;
       if (error == null || error == previous?.lastError || !mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error),
-          backgroundColor: const Color(0xFF12182C),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showAppToast(
+        context,
+        message: error,
+        type: appToastTypeForMessage(error),
       );
     });
 
@@ -86,17 +63,17 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
         SafeArea(
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final contentHeight = math.max(
-                constraints.maxHeight,
-                isConnected ? 690.0 : 760.0,
-              );
-              return SingleChildScrollView(
-                physics: contentHeight > constraints.maxHeight
-                    ? const BouncingScrollPhysics()
-                    : const NeverScrollableScrollPhysics(),
-                child: SizedBox(
-                  height: contentHeight,
-                  child: _buildHomeContent(isConnected),
+              final contentHeight = constraints.maxHeight;
+              return RefreshIndicator(
+                color: AppColors.primary,
+                backgroundColor: AppColors.bgCard,
+                onRefresh: _refreshSubscription,
+                child: SingleChildScrollView(
+                  physics: const NeverScrollableScrollPhysics(),
+                  child: SizedBox(
+                    height: contentHeight,
+                    child: _buildHomeContent(isConnected),
+                  ),
                 ),
               );
             },
@@ -139,29 +116,23 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   }
 
   Widget _buildHeader() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // Logo
-          Image.asset('assets/images/logo.png', height: 24),
-          SubscriptionStatusBadge(
-            subscription: ref.watch(subscriptionProvider).subscription,
-            trialLeft: ref.watch(trialProvider).timeLeft,
-          ),
-        ],
+    return AppHeader(
+      trailing: SubscriptionStatusBadge(
+        subscription: ref.watch(subscriptionProvider).subscription,
+        trialLeft: ref.watch(trialProvider).timeLeft,
       ),
     );
   }
 
   Widget _buildConnectedStatus() {
+    final vpnState = ref.watch(vpnProvider);
+
     return Column(
       key: const ValueKey('connected-control'),
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          _formatDuration(_connectedFor),
+          _formatDuration(vpnState.connectedFor),
           style: GoogleFonts.manrope(
             fontSize: 28,
             color: Colors.white,
@@ -197,12 +168,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
 
   Widget _buildDisconnectButton() {
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          _connectedFor = Duration.zero;
-        });
-        ref.read(vpnProvider.notifier).disconnect();
-      },
+      onTap: () => ref.read(vpnProvider.notifier).disconnect(),
       behavior: HitTestBehavior.opaque,
       child: Container(
         width: 152,
@@ -229,6 +195,8 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   }
 
   Widget _buildSpeedCard() {
+    final vpnState = ref.watch(vpnProvider);
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 18),
       child: Container(
@@ -242,7 +210,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
             Expanded(
               child: _buildSpeedMetric(
                 iconPath: 'assets/icons/connected/download.svg',
-                value: '52.4 Mbps',
+                value: _formatBitrate(vpnState.downloadSpeedBytesPerSecond),
                 label: 'Download',
                 labelColor: AppColors.success,
               ),
@@ -251,7 +219,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
             Expanded(
               child: _buildSpeedMetric(
                 iconPath: 'assets/icons/connected/upload.svg',
-                value: '31.2 Mbps',
+                value: _formatBitrate(vpnState.uploadSpeedBytesPerSecond),
                 label: 'Upload',
                 labelColor: const Color(0xFFF5700B),
               ),
@@ -260,6 +228,16 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
         ),
       ),
     );
+  }
+
+  String _formatBitrate(int bytesPerSecond) {
+    if (bytesPerSecond <= 0) return '0 Kbps';
+    final kbps = bytesPerSecond * 8 / 1000;
+    if (kbps < 1000) {
+      return '${kbps.toStringAsFixed(kbps >= 100 ? 0 : 1)} Kbps';
+    }
+    final mbps = kbps / 1000;
+    return '${mbps.toStringAsFixed(mbps >= 10 ? 1 : 2)} Mbps';
   }
 
   Widget _buildSpeedMetric({
@@ -315,6 +293,20 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                 color: const Color(0xFF0C0E20),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: const Color(0xFF0F1628), width: 1),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x3300A2FF),
+                    blurRadius: 30,
+                    spreadRadius: 1,
+                    offset: Offset(0, 10),
+                  ),
+                  BoxShadow(
+                    color: Color(0x1A37FFB4),
+                    blurRadius: 18,
+                    spreadRadius: -2,
+                    offset: Offset(0, 0),
+                  ),
+                ],
               ),
               child: Column(
                 children: [
@@ -330,7 +322,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                       // Text
                       Expanded(
                         child: Text(
-                          'Бесплатный VPN на 24 часа, чтобы Вы смогли оформить подписку',
+                          'Бесплатный VPN на 24 часа, чтобы Вы смогли открыть доступ',
                           style: GoogleFonts.manrope(
                             fontSize: 12,
                             color: Colors.white,
@@ -344,10 +336,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                   const SizedBox(height: 20),
                   // Button
                   GestureDetector(
-                    onTap: () {
-                      // Navigate to subscription screen
-                      setState(() => _showTrialBanner = false);
-                    },
+                    onTap: () => openSubscriptionFlow(context, ref),
                     child: Container(
                       clipBehavior: Clip.antiAlias,
                       width: double.infinity,
@@ -355,6 +344,20 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                       decoration: BoxDecoration(
                         color: const Color(0xFF00A2FF),
                         borderRadius: BorderRadius.circular(12),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x6600A2FF),
+                            blurRadius: 22,
+                            spreadRadius: 1,
+                            offset: Offset(0, 8),
+                          ),
+                          BoxShadow(
+                            color: Color(0x3300E5FF),
+                            blurRadius: 18,
+                            spreadRadius: -3,
+                            offset: Offset(0, 0),
+                          ),
+                        ],
                       ),
                       child: Stack(
                         children: [
@@ -367,7 +370,7 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                           ),
                           Center(
                             child: Text(
-                              'Оформить подписку сразу',
+                              'Авторизоваться',
                               style: AppTextStyles.button,
                             ),
                           ),
@@ -402,10 +405,39 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
       onTap: enabled ? _handlePowerTap : null,
       child: Opacity(
         opacity: enabled ? 1 : 0.45,
-        child: SvgPicture.asset(
-          'assets/images/big-btn.svg',
+        child: SizedBox(
           width: 240,
           height: 240,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              if (enabled)
+                Container(
+                  width: 202,
+                  height: 202,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Color(0x3000A2FF),
+                        blurRadius: 30,
+                        spreadRadius: 2,
+                      ),
+                      BoxShadow(
+                        color: Color(0x1800E5FF),
+                        blurRadius: 46,
+                        spreadRadius: 5,
+                      ),
+                    ],
+                  ),
+                ),
+              SvgPicture.asset(
+                'assets/images/big-btn.svg',
+                width: 240,
+                height: 240,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -414,7 +446,6 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   Future<void> _handlePowerTap() async {
     final shouldContinue = await _showVpnPermissionHint();
     if (!shouldContinue || !mounted) return;
-    setState(() => _connectedFor = Duration.zero);
     await ref.read(vpnProvider.notifier).toggleConnection();
   }
 
@@ -466,7 +497,20 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
   Widget _buildVpnControlBlock(bool isConnected) {
     final subscription = ref.watch(subscriptionProvider).subscription;
     final trial = ref.watch(trialProvider);
-    final canConnect = subscription.isActive || !trial.isExpired;
+    final vpnStatus = ref.watch(vpnProvider).status;
+    final hasServer = ref.watch(subscriptionProvider).effectiveServer != null;
+    final canUseAccess = subscription.isActive || !trial.isExpired;
+    final canConnect =
+        canUseAccess &&
+        hasServer &&
+        vpnStatus != VpnStatus.connecting &&
+        vpnStatus != VpnStatus.reconnecting;
+    final statusText = _vpnStatusText(
+      canUseAccess: canUseAccess,
+      hasServer: hasServer,
+      subscription: subscription,
+      vpnStatus: vpnStatus,
+    );
 
     return SizedBox(
       height: 284,
@@ -491,16 +535,31 @@ class _HomeScreenNewState extends ConsumerState<HomeScreenNew> {
                 children: [
                   _buildPowerButton(enabled: canConnect),
                   const SizedBox(height: 20),
-                  _buildStatusText(canConnect: canConnect),
+                  _buildStatusText(statusText),
                 ],
               ),
       ),
     );
   }
 
-  Widget _buildStatusText({required bool canConnect}) {
+  String _vpnStatusText({
+    required bool canUseAccess,
+    required bool hasServer,
+    required Subscription subscription,
+    required VpnStatus vpnStatus,
+  }) {
+    if (vpnStatus == VpnStatus.connecting) return 'Подключаемся...';
+    if (vpnStatus == VpnStatus.reconnecting) return 'Переподключаемся...';
+    if (!canUseAccess) return 'Пробный период истёк';
+    if (!hasServer) {
+      return subscription.userFacingError ?? 'Нет доступных серверов';
+    }
+    return 'Нажмите для подключения...';
+  }
+
+  Widget _buildStatusText(String text) {
     return Text(
-      canConnect ? 'Нажмите для подключения...' : 'Пробный период истёк',
+      text,
       style: GoogleFonts.manrope(
         fontSize: 14,
         color: const Color(0xFF628499),

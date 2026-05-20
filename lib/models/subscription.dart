@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'vpn_server.dart';
 
 /// Snapshot of the user's subscription + available servers, as returned
@@ -32,12 +34,16 @@ class Subscription {
   /// All servers the user can currently connect to.
   final List<VpnServer> servers;
 
+  /// Backend grants a short one-server access window after expiration.
+  final bool isGracePeriod;
+
   /// Raw error message from backend, if any.
   final String? errorMessage;
 
   const Subscription({
     required this.isActive,
     required this.servers,
+    this.isGracePeriod = false,
     this.expiresAt,
     this.trafficUsedBytes,
     this.trafficLimitBytes,
@@ -48,6 +54,47 @@ class Subscription {
   });
 
   static const Subscription empty = Subscription(isActive: false, servers: []);
+
+  Subscription copyWith({
+    bool? isActive,
+    DateTime? expiresAt,
+    int? trafficUsedBytes,
+    int? trafficLimitBytes,
+    String? planName,
+    int? deviceUsedCount,
+    int? deviceLimitCount,
+    List<VpnServer>? servers,
+    bool? isGracePeriod,
+    String? errorMessage,
+    bool clearExpiresAt = false,
+    bool clearTrafficUsed = false,
+    bool clearTrafficLimit = false,
+    bool clearPlanName = false,
+    bool clearDeviceUsed = false,
+    bool clearDeviceLimit = false,
+    bool clearError = false,
+  }) {
+    return Subscription(
+      isActive: isActive ?? this.isActive,
+      servers: servers ?? this.servers,
+      isGracePeriod: isGracePeriod ?? this.isGracePeriod,
+      expiresAt: clearExpiresAt ? null : (expiresAt ?? this.expiresAt),
+      trafficUsedBytes: clearTrafficUsed
+          ? null
+          : (trafficUsedBytes ?? this.trafficUsedBytes),
+      trafficLimitBytes: clearTrafficLimit
+          ? null
+          : (trafficLimitBytes ?? this.trafficLimitBytes),
+      planName: clearPlanName ? null : (planName ?? this.planName),
+      deviceUsedCount: clearDeviceUsed
+          ? null
+          : (deviceUsedCount ?? this.deviceUsedCount),
+      deviceLimitCount: clearDeviceLimit
+          ? null
+          : (deviceLimitCount ?? this.deviceLimitCount),
+      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+    );
+  }
 
   int? get daysLeft {
     if (expiresAt == null) return null;
@@ -70,19 +117,45 @@ class Subscription {
     return value == 'limit_devices' ||
         value == 'device_limit' ||
         value == 'devices_limit' ||
+        value == 'limit_reached' ||
+        value == 'device_limit_reached' ||
         value?.contains('limit_devices') == true;
   }
 
+  bool get isPayloadPending {
+    final value = errorMessage?.toLowerCase().trim();
+    return value == 'subscription_payload_empty' ||
+        value == 'subscription_payload_not_loaded';
+  }
+
   String? get userFacingError {
-    if (isDeviceLimitExceeded) return 'Лимит устройств исчерпан';
+    if (isDeviceLimitExceeded) {
+      if (deviceUsedCount != null && deviceLimitCount != null) {
+        return 'Лимит устройств достигнут ($deviceUsedCount/$deviceLimitCount)';
+      }
+      return 'Лимит устройств достигнут';
+    }
+    final value = errorMessage?.toLowerCase().trim();
+    if (value == 'subscription_inactive_or_expired') {
+      return 'Подписка истекла';
+    }
+    if (value == 'grace_period_config_build_failed') {
+      return 'Дополнительный доступ истёк. Продлите подписку.';
+    }
+    if (isPayloadPending) {
+      return 'Подписка ещё обрабатывается. Попробуйте обновить позже.';
+    }
     return errorMessage;
   }
 
   Map<String, dynamic> toCacheJson() => {
     'success': isActive || servers.isNotEmpty,
-    'items': servers.map((s) => s.url).toList(),
+    'items': servers.map((s) => VpnServer.protectUrl(s.url)).toList(),
     'meta': {
-      'status': isActive ? 'active' : 'trial',
+      'status': isGracePeriod
+          ? 'grace_period'
+          : (isActive ? 'active' : 'trial'),
+      if (isGracePeriod) 'grace_period': true,
       if (expiresAt != null) 'date_finish': expiresAt!.toIso8601String(),
       if (trafficUsedBytes != null) 'used_total_bytes': trafficUsedBytes,
       if (trafficLimitBytes != null) 'traffic_limit_bytes': trafficLimitBytes,
@@ -130,13 +203,8 @@ class Subscription {
   static Subscription _fromServerList(List raw) {
     final servers = <VpnServer>[];
     for (final item in raw) {
-      if (item is String) {
-        final s = VpnServer.tryParse(item);
-        if (s != null) servers.add(s);
-      } else if (item is Map && item['url'] is String) {
-        final s = VpnServer.tryParse(item['url'] as String);
-        if (s != null) servers.add(s);
-      }
+      final s = _serverFromItem(item);
+      if (s != null) servers.add(s);
     }
     return Subscription(isActive: servers.isNotEmpty, servers: servers);
   }
@@ -144,35 +212,26 @@ class Subscription {
   static Subscription _fromMap(Map<String, dynamic> json) {
     // Success flag — backend may use any of: success, ok, status.
     final successRaw = json['success'] ?? json['ok'] ?? json['status'];
+    final successText = successRaw?.toString().toLowerCase();
     final success =
         successRaw == true ||
         successRaw == 1 ||
-        successRaw == 'ok' ||
-        successRaw == 'success';
+        successText == 'ok' ||
+        successText == 'success' ||
+        successText == 'active' ||
+        successText == 'paid' ||
+        successText == 'enabled';
 
     final errorMessage = (json['error'] ?? json['message'] ?? json['detail'])
         ?.toString();
 
-    dynamic serversRaw =
-        json['servers'] ??
-        json['items'] ??
-        json['configs'] ??
-        json['vless'] ??
-        json['trial_servers'] ??
-        json['free_servers'] ??
-        json['data'] ??
-        (json['subscription'] is Map ? json['subscription']['servers'] : null);
+    dynamic serversRaw = _serverPayloadFromMap(json);
 
     final servers = <VpnServer>[];
     if (serversRaw is List) {
       for (final item in serversRaw) {
-        if (item is String) {
-          final s = VpnServer.tryParse(item);
-          if (s != null) servers.add(s);
-        } else if (item is Map && item['url'] is String) {
-          final s = VpnServer.tryParse(item['url'] as String);
-          if (s != null) servers.add(s);
-        }
+        final s = _serverFromItem(item);
+        if (s != null) servers.add(s);
       }
     } else if (serversRaw is String) {
       // Maybe it's a single concatenated string of vless lines.
@@ -196,9 +255,11 @@ class Subscription {
         subRaw['expire'] ??
         subRaw['valid_until'] ??
         subRaw['date_finish'] ??
-        subRaw['finished_at'];
+        subRaw['finished_at'] ??
+        subRaw['date_end'] ??
+        subRaw['end_date'];
     if (expField is String) {
-      expiresAt = DateTime.tryParse(expField);
+      expiresAt = _parseDate(expField);
     } else if (expField is int) {
       // Could be seconds OR milliseconds. Heuristic: > 1e12 means ms.
       expiresAt = DateTime.fromMillisecondsSinceEpoch(
@@ -206,19 +267,26 @@ class Subscription {
       );
     }
 
-    final trafficUsed = _trafficBytesFrom(
+    final whitelistTrafficUsed = _trafficBytesFrom(
       subRaw,
-      byteKeys: const [
-        'traffic_used_bytes',
-        'used_total_bytes',
-        'used_bytes',
-        'traffic_used',
-        'used',
-        'usage',
-        'traffic',
-      ],
-      gbKeys: const ['traffic_used_gb', 'used_total_gb', 'used_gb'],
+      byteKeys: const ['traffic_whitelist_total_bytes'],
+      gbKeys: const ['traffic_whitelist_total_gb'],
     );
+    final trafficUsed =
+        whitelistTrafficUsed ??
+        _trafficBytesFrom(
+          subRaw,
+          byteKeys: const [
+            'traffic_used_bytes',
+            'used_total_bytes',
+            'used_bytes',
+            'traffic_used',
+            'used',
+            'usage',
+            'traffic',
+          ],
+          gbKeys: const ['traffic_used_gb', 'used_total_gb', 'used_gb'],
+        );
     final trafficLimit = _trafficBytesFrom(
       subRaw,
       byteKeys: const [
@@ -231,13 +299,7 @@ class Subscription {
         'quota',
         'total',
       ],
-      gbKeys: const [
-        'traffic_whitelist_total_gb',
-        'traffic_limit_gb',
-        'limit_gb',
-        'quota_gb',
-        'total_gb',
-      ],
+      gbKeys: const ['traffic_limit_gb', 'limit_gb', 'quota_gb', 'total_gb'],
     );
     final deviceUsed = _asInt(
       subRaw['devices_used'] ??
@@ -269,32 +331,94 @@ class Subscription {
     final status = (subRaw['status'] ?? json['status'])
         ?.toString()
         .toLowerCase();
+    final message = errorMessage?.trim();
+    final gracePeriod = _asBool(subRaw['grace_period'] ?? json['grace_period']);
+    final limitReached = _asBool(
+      subRaw['limit_reached'] ?? json['limit_reached'],
+    );
     final activeByStatus =
         status == null ||
         status == 'active' ||
         status == 'paid' ||
-        status == 'enabled';
-    final limitError = _isLimitDevicesError(errorMessage);
+        status == 'enabled' ||
+        status == 'test_period';
+    final limitError = limitReached || _isLimitDevicesError(message);
     final hasActivePeriod =
-        expiresAt == null || expiresAt.isAfter(DateTime.now());
+        expiresAt == null || expiresAt.isAfter(DateTime.now()) || gracePeriod;
 
     final isActive =
-        activeByStatus &&
-        hasActivePeriod &&
-        (success || limitError) &&
-        (servers.isNotEmpty || limitError || deviceLimit != null);
+        (gracePeriod && success && servers.isNotEmpty) ||
+        (activeByStatus &&
+            hasActivePeriod &&
+            (success || limitError) &&
+            (servers.isNotEmpty || limitError || deviceLimit != null));
 
     return Subscription(
       isActive: isActive,
       servers: servers,
+      isGracePeriod: gracePeriod,
       expiresAt: expiresAt,
       trafficUsedBytes: trafficUsed,
       trafficLimitBytes: trafficLimit,
       planName: plan,
       deviceUsedCount: deviceUsed,
       deviceLimitCount: deviceLimit,
-      errorMessage: success ? null : errorMessage,
+      errorMessage: limitError ? 'limit_reached' : (success ? null : message),
     );
+  }
+
+  static dynamic _serverPayloadFromMap(Map<String, dynamic> json) {
+    for (final key in const [
+      'servers',
+      'items',
+      'configs',
+      'vless',
+      'trial_servers',
+      'free_servers',
+    ]) {
+      final value = json[key];
+      if (value != null) return value;
+    }
+
+    for (final key in const ['data', 'subscription']) {
+      final nested = json[key];
+      if (nested is Map<String, dynamic>) {
+        final value = _serverPayloadFromMap(nested);
+        if (value != null) return value;
+      } else if (nested is List || nested is String) {
+        return nested;
+      }
+    }
+
+    return null;
+  }
+
+  static String? _serverUrlFromMap(Map item) {
+    for (final key in const ['url', 'link', 'uri', 'config']) {
+      final value = item[key];
+      if (value is String && value.trim().isNotEmpty) return value;
+    }
+    return null;
+  }
+
+  static VpnServer? _serverFromItem(dynamic item) {
+    if (item is String) return VpnServer.tryParse(item);
+
+    if (item is Map) {
+      final url = _serverUrlFromMap(item);
+      if (url != null) return VpnServer.tryParse(url);
+
+      final config = item['config'];
+      if (config is Map) {
+        final s = VpnServer.tryParse(jsonEncode(config));
+        if (s != null) return s;
+      }
+
+      final s = VpnServer.tryParse(jsonEncode(item));
+      if (s != null) return s;
+    }
+
+    return null;
   }
 
   static bool _isLimitDevicesError(String? value) {
@@ -302,7 +426,25 @@ class Subscription {
     return normalized == 'limit_devices' ||
         normalized == 'device_limit' ||
         normalized == 'devices_limit' ||
+        normalized == 'limit_reached' ||
+        normalized == 'device_limit_reached' ||
         normalized?.contains('limit_devices') == true;
+  }
+
+  static bool _asBool(dynamic value) {
+    if (value == true || value == 1) return true;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' || normalized == '1' || normalized == 'yes';
+    }
+    return false;
+  }
+
+  static DateTime? _parseDate(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return DateTime.tryParse(trimmed) ??
+        DateTime.tryParse(trimmed.replaceFirst(' ', 'T'));
   }
 
   static int? _asInt(dynamic v) {

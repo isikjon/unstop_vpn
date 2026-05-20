@@ -76,16 +76,48 @@ class AuthService {
 
     try {
       final json = jsonDecode(response.body) as Map<String, dynamic>;
-      final authenticated = json['authenticated'] == true;
-      final id = json['telegram_id'] ?? json['tg_id'] ?? json['user_id'];
+      final payload = _findAuthPayload(json);
+      final id = _readTelegramId(payload) ?? _readTelegramId(json);
+      final authenticated =
+          json['authenticated'] == true ||
+          payload['authenticated'] == true ||
+          (json['success'] == true &&
+              id != null &&
+              json['authenticated'] != false);
       return BotAuthStatusResult(
         authenticated: authenticated && id != null,
         telegramId: id?.toString(),
-        name: json['name']?.toString(),
+        name: _readName(payload) ?? _readName(json),
       );
     } catch (_) {
       throw AuthException('Неверный ответ сервера');
     }
+  }
+
+  static Map<String, dynamic> _findAuthPayload(Map<String, dynamic> json) {
+    for (final key in const ['user', 'data', 'auth', 'account', 'profile']) {
+      final value = json[key];
+      if (value is Map<String, dynamic>) return value;
+    }
+    return json;
+  }
+
+  static Object? _readTelegramId(Map<String, dynamic> json) {
+    return json['telegram_id'] ??
+        json['telegramId'] ??
+        json['tg_id'] ??
+        json['tgId'] ??
+        json['user_id'] ??
+        json['userId'] ??
+        json['id'];
+  }
+
+  static String? _readName(Map<String, dynamic> json) {
+    return (json['name'] ??
+            json['first_name'] ??
+            json['firstName'] ??
+            json['username'])
+        ?.toString();
   }
 
   /// Primary auth: check if the bot already received the user's contact.

@@ -4,6 +4,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../providers/auth_provider.dart';
 import '../providers/subscription_provider.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_toast.dart';
 import 'auth_screen.dart';
 import 'home_screen_new.dart';
 import 'subscription_screen.dart';
@@ -44,6 +45,19 @@ class _MainShellState extends ConsumerState<MainShell> {
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
 
+    ref.listen<SubscriptionState>(subscriptionProvider, (previous, next) {
+      final message = _subscriptionToastMessage(next);
+      final previousMessage = previous == null
+          ? null
+          : _subscriptionToastMessage(previous);
+      if (message == null || message == previousMessage || !mounted) return;
+      showAppToast(
+        context,
+        message: message,
+        type: appToastTypeForMessage(message),
+      );
+    });
+
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: _currentIndex == 2 && !auth.isAuthenticated
@@ -51,6 +65,47 @@ class _MainShellState extends ConsumerState<MainShell> {
           : IndexedStack(index: _currentIndex, children: _screens),
       bottomNavigationBar: _buildNewNavBar(),
     );
+  }
+
+  String? _subscriptionToastMessage(SubscriptionState state) {
+    final subscriptionError = state.subscription.userFacingError;
+    if (subscriptionError != null && subscriptionError.trim().isNotEmpty) {
+      return subscriptionError;
+    }
+
+    final error = state.error;
+    if (error == null || error.trim().isEmpty) return null;
+    return _normalizeErrorMessage(error);
+  }
+
+  String _normalizeErrorMessage(String message) {
+    final text = message.toLowerCase();
+    if (text == 'limit_devices' ||
+        text == 'limit_reached' ||
+        text.contains('limit_devices') ||
+        text.contains('device_limit') ||
+        text.contains('devices_limit')) {
+      return 'Лимит устройств достигнут';
+    }
+    if (text == 'subscription_inactive_or_expired') {
+      return 'Подписка истекла';
+    }
+    if (text == 'grace_period_config_build_failed') {
+      return 'Дополнительный доступ истёк. Продлите подписку.';
+    }
+    if (text == 'subscription_payload_empty' ||
+        text == 'subscription_payload_not_loaded') {
+      return 'Подписка ещё обрабатывается. Попробуйте обновить позже.';
+    }
+    return message;
+  }
+
+  void _selectTab(int index) {
+    setState(() => _currentIndex = index);
+    final auth = ref.read(authProvider);
+    if (auth.isAuthenticated) {
+      ref.read(subscriptionProvider.notifier).refresh();
+    }
   }
 
   Widget _buildNewNavBar() {
@@ -70,19 +125,19 @@ class _MainShellState extends ConsumerState<MainShell> {
               assetPath: _currentIndex == 0
                   ? 'assets/icons/bottom_bar/vpn_active.svg'
                   : 'assets/icons/bottom_bar/vpn_default.svg',
-              onTap: () => setState(() => _currentIndex = 0),
+              onTap: () => _selectTab(0),
             ),
             _buildBottomBarItem(
               assetPath: _currentIndex == 1
                   ? 'assets/icons/bottom_bar/podpiska_active.svg'
                   : 'assets/icons/bottom_bar/podpiska_default.svg',
-              onTap: () => setState(() => _currentIndex = 1),
+              onTap: () => _selectTab(1),
             ),
             _buildBottomBarItem(
               assetPath: _currentIndex == 2
                   ? 'assets/icons/bottom_bar/profile_active.svg'
                   : 'assets/icons/bottom_bar/profile_default.svg',
-              onTap: () => setState(() => _currentIndex = 2),
+              onTap: () => _selectTab(2),
             ),
           ],
         ),

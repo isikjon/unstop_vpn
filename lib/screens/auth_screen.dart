@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -12,6 +14,8 @@ import '../providers/trial_provider.dart';
 import '../screens/main_shell.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_header.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/inset_shadow.dart';
 import '../widgets/shared_hero_background.dart';
 
@@ -50,10 +54,46 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     await _launchBotAuthLink(_botLink!);
   }
 
-  void _setError(String msg) => setState(() {
-    _error = msg;
-    _busy = false;
-  });
+  Future<void> _copyBotAuthLink() async {
+    var link = _botLink;
+    if (link == null || link.isEmpty) {
+      try {
+        final result = await AuthService.startBotAuth();
+        if (!mounted) return;
+        link = result.botLink;
+        setState(() {
+          _authKey = result.key;
+          _botLink = result.botLink;
+          _uiStep = 1;
+        });
+        _startAuthPolling();
+      } on AuthException catch (e) {
+        _setError(e.message);
+        return;
+      } catch (_) {
+        _setError('Не удалось создать ссылку для Telegram');
+        return;
+      }
+    }
+
+    await Clipboard.setData(ClipboardData(text: link));
+    if (!mounted) return;
+    showAppToast(
+      context,
+      message: 'Ссылка скопирована',
+      type: AppToastType.success,
+      duration: const Duration(seconds: 2),
+    );
+  }
+
+  void _setError(String msg, {AppToastType type = AppToastType.error}) {
+    if (!mounted) return;
+    setState(() {
+      _error = msg;
+      _busy = false;
+    });
+    showAppToast(context, message: msg, type: type);
+  }
 
   void _clearError() => setState(() => _error = null);
 
@@ -114,9 +154,9 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         return;
       }
       if (!silent) {
-        final suffix = _authKey == null ? '' : '\nКлюч: key_$_authKey';
         _setError(
-          'Авторизация ещё не подтверждена. Нажмите Start/Подтвердить в боте.$suffix',
+          'Авторизация ещё не подтверждена. Нажмите Start/Подтвердить в боте.',
+          type: AppToastType.warning,
         );
       }
     } on AuthException catch (e) {
@@ -136,6 +176,21 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     final start = httpsUri.queryParameters['start'];
 
     if (domain.isNotEmpty && start != null && start.isNotEmpty) {
+      if (Platform.isAndroid) {
+        final intentUri = Uri.parse(
+          'intent://resolve?domain=$domain&start=$start'
+          '#Intent;scheme=tg;'
+          'S.browser_fallback_url=${Uri.encodeComponent(botLink)};end',
+        );
+        try {
+          final opened = await launchUrl(
+            intentUri,
+            mode: LaunchMode.externalApplication,
+          );
+          if (opened) return;
+        } catch (_) {}
+      }
+
       final tgUri = Uri(
         scheme: 'tg',
         host: 'resolve',
@@ -150,7 +205,15 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
       } catch (_) {}
     }
 
-    await launchUrl(httpsUri, mode: LaunchMode.externalApplication);
+    try {
+      final opened = await launchUrl(
+        httpsUri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (opened) return;
+    } catch (_) {}
+
+    throw AuthException('Не удалось открыть Telegram');
   }
 
   void _openMainTab(int index) {
@@ -181,27 +244,41 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                   const SizedBox(height: 16),
                   _header(),
                   const Spacer(),
-                  ClipPath(
-                    clipper: const _TopArcClipper(),
-                    child: Container(
-                      width: double.infinity,
-                      padding: EdgeInsets.only(
-                        top: 54,
-                        bottom: keyboard > 0 ? keyboard + 18 : bottomGap,
-                      ),
-                      color: const Color(0xFF000214),
-                      child: AnimatedPadding(
-                        duration: const Duration(milliseconds: 220),
-                        curve: Curves.easeOut,
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 220),
-                          switchInCurve: Curves.easeOut,
-                          switchOutCurve: Curves.easeIn,
-                          child: _buildCurrentStep(),
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      ClipPath(
+                        clipper: const _TopArcClipper(),
+                        child: Container(
+                          width: double.infinity,
+                          padding: EdgeInsets.only(
+                            top: 54,
+                            bottom: keyboard > 0 ? keyboard + 18 : bottomGap,
+                          ),
+                          color: const Color(0xFF000214),
+                          child: AnimatedPadding(
+                            duration: const Duration(milliseconds: 220),
+                            curve: Curves.easeOut,
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 220),
+                              switchInCurve: Curves.easeOut,
+                              switchOutCurve: Curves.easeIn,
+                              child: _buildCurrentStep(),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
+                      const Positioned(
+                        top: -2,
+                        left: 0,
+                        right: 0,
+                        height: 72,
+                        child: IgnorePointer(
+                          child: CustomPaint(painter: _TopArcGlowPainter()),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -220,16 +297,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   }
 
   Widget _header() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Row(
-        children: [
-          Image.asset('assets/images/logo.png', height: 24),
-          const Spacer(),
-          _trialBadge(),
-        ],
-      ),
-    );
+    return AppHeader(trailing: _trialBadge());
   }
 
   Widget _trialBadge() {
@@ -267,11 +335,25 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         _authTitle(),
         const SizedBox(height: 8),
         _paragraph(
-          'Нажмите кнопку ниже, откройте Telegram-бота\nи подтвердите вход в UNSTOP VPN.',
+          'Нажмите на кнопку ниже, откройте\nTelegram бота подтвердите вход\nв UnStop VPN',
         ),
         if (_error != null) ...[const SizedBox(height: 10), _errorText()],
         const SizedBox(height: 28),
-        _primaryButton(label: 'Авторизоваться', onTap: _startBotAuth),
+        Row(
+          children: [
+            Expanded(
+              child: _primaryButton(
+                label: 'Авторизоваться',
+                onTap: _startBotAuth,
+              ),
+            ),
+            const SizedBox(width: 8),
+            _squareIconButton(
+              icon: Icons.copy_rounded,
+              onTap: _busy ? null : _copyBotAuthLink,
+            ),
+          ],
+        ),
       ],
     );
   }
@@ -301,6 +383,11 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                 _error = null;
                 _authPollTimer?.cancel();
               }),
+            ),
+            const SizedBox(width: 8),
+            _squareIconButton(
+              icon: Icons.copy_rounded,
+              onTap: _busy ? null : _copyBotAuthLink,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -504,6 +591,27 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     );
   }
 
+  Widget _squareIconButton({
+    required IconData icon,
+    required FutureOr<void> Function()? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 55,
+        height: 55,
+        decoration: BoxDecoration(
+          color: const Color(0xFF080C1D).withValues(alpha: 0.95),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Center(
+          child: Icon(icon, color: const Color(0xFFD2EEFF), size: 22),
+        ),
+      ),
+    );
+  }
+
   Widget _bottomNav() {
     return Container(
       height: 92,
@@ -569,4 +677,35 @@ class _TopArcClipper extends CustomClipper<Path> {
 
   @override
   bool shouldReclip(covariant _TopArcClipper oldClipper) => false;
+}
+
+class _TopArcGlowPainter extends CustomPainter {
+  const _TopArcGlowPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(0, 40)
+      ..quadraticBezierTo(size.width / 2, 2, size.width, 40);
+
+    final glowPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeCap = StrokeCap.round
+      ..color = const Color(0xFF00A2FF).withValues(alpha: 0.22)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+    canvas.drawPath(path, glowPaint);
+
+    final linePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..shader = const LinearGradient(
+        colors: [Color(0x0000A2FF), Color(0xFF00A2FF), Color(0x0000A2FF)],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
+    canvas.drawPath(path, linePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _TopArcGlowPainter oldDelegate) => false;
 }

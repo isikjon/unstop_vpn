@@ -17,7 +17,7 @@ class TunnelSettings {
     this.fragmentPackets = 'tlshello',
     this.fragmentLength = '50-100',
     this.fragmentInterval = '10-15',
-    this.noiseEnabled = false,
+    this.noiseEnabled = true,
     this.noiseType = 'rand',
     this.noisePacket = '10-20',
     this.noiseDelay = '10-16',
@@ -83,7 +83,7 @@ class TunnelSettingsNotifier extends Notifier<TunnelSettings> {
     final prefs = await SharedPreferences.getInstance();
     state = state.copyWith(
       fragmentEnabled: prefs.getBool(_kFragment) ?? true,
-      noiseEnabled: prefs.getBool(_kNoise) ?? false,
+      noiseEnabled: prefs.getBool(_kNoise) ?? true,
     );
   }
 

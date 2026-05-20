@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "tun2sockskit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/EbrahimTahernejad/Tun2SocksKit",
+      "state" : {
+        "revision" : "b45a1ea3d68b10667d87b56571ce26126803dccd",
+        "version" : "4.13.0"
+      }
+    }
+  ],
+  "version" : 2
+}

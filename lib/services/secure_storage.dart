@@ -40,6 +40,9 @@ class VpnSecureStorage {
   static Future<String?> getSelectedServerId() =>
       _storage.read(key: _keySelectedServer);
 
+  static Future<void> clearSelectedServerId() =>
+      _storage.delete(key: _keySelectedServer);
+
   static Future<Set<String>> getPinnedServerIds() async {
     final raw = await _storage.read(key: _keyPinnedServers);
     if (raw == null || raw.trim().isEmpty) return <String>{};
@@ -48,6 +51,9 @@ class VpnSecureStorage {
 
   static Future<void> savePinnedServerIds(Set<String> ids) =>
       _storage.write(key: _keyPinnedServers, value: ids.join('\n'));
+
+  static Future<void> clearPinnedServerIds() =>
+      _storage.delete(key: _keyPinnedServers);
 
   static Future<void> saveCachedSubscriptionPayload(String payload) =>
       _storage.write(key: _keyCachedSubscription, value: payload);

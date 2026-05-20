@@ -1,16 +1,19 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../models/subscription.dart';
+import '../models/vpn_status.dart';
 import '../models/vpn_server.dart';
 import '../providers/subscription_provider.dart';
 import '../providers/trial_provider.dart';
+import '../providers/vpn_provider.dart';
 import '../services/secure_storage.dart';
 import '../theme/app_theme.dart';
+import '../utils/subscription_flow.dart';
 import '../widgets/inset_shadow.dart';
 
 class ServersScreen extends ConsumerStatefulWidget {
@@ -26,6 +29,8 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
   final Map<String, String> _serverPings = <String, String>{};
   final Set<String> _pendingPingIds = <String>{};
   String? _openActionServerId;
+  Future<void> _pingQueue = Future<void>.value();
+  int _pingGeneration = 0;
 
   @override
   void initState() {
@@ -66,29 +71,37 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
         children: [
           const Positioned.fill(child: _ServersBackground()),
           SafeArea(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(32, 28, 32, 40),
-              children: [
-                _buildHeader(subState.subscription.servers.length),
-                const SizedBox(height: 18),
-                _buildSearch(),
-                const SizedBox(height: 18),
-                if (servers.isNotEmpty) ...[
-                  _buildServerList(servers),
+            child: RefreshIndicator(
+              color: AppColors.primary,
+              backgroundColor: AppColors.bgCard,
+              onRefresh: _refreshServers,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(32, 28, 32, 40),
+                children: [
+                  _buildHeader(subState.subscription.servers.length),
                   const SizedBox(height: 18),
-                ] else if (subState.isLoading && !trial.isExpired) ...[
-                  _buildServersLoadingCard(),
+                  _buildSearch(),
                   const SizedBox(height: 18),
-                ] else ...[
-                  _buildNoServersCard(
-                    trial.isExpired,
-                    subState.subscription.userFacingError,
-                  ),
-                  const SizedBox(height: 18),
+                  if (servers.isNotEmpty) ...[
+                    _buildServerList(servers),
+                    const SizedBox(height: 18),
+                  ] else if (subState.isLoading &&
+                      !trial.isExpired &&
+                      !subState.subscription.isActive) ...[
+                    _buildServersLoadingCard(),
+                    const SizedBox(height: 18),
+                  ] else ...[
+                    _buildNoServersCard(
+                      subscription: subState.subscription,
+                      trialExpired: trial.isExpired,
+                    ),
+                    const SizedBox(height: 18),
+                  ],
+                  if (!subState.subscription.isActive)
+                    _buildNoSubscriptionCard(enabled: !trial.isExpired),
                 ],
-                if (!subState.subscription.isActive)
-                  _buildNoSubscriptionCard(enabled: !trial.isExpired),
-              ],
+              ),
             ),
           ),
         ],
@@ -159,10 +172,12 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
 
   Future<void> _refreshServers() async {
     setState(() {
+      _pingGeneration += 1;
+      _pingQueue = Future<void>.value();
       _serverPings.clear();
       _pendingPingIds.clear();
     });
-    await ref.read(subscriptionProvider.notifier).refresh();
+    await ref.read(subscriptionProvider.notifier).refresh(force: true);
   }
 
   Widget _buildSearch() {
@@ -232,23 +247,11 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
       },
       onTogglePinned: () => _togglePinnedServer(server),
       child: GestureDetector(
-        onTap: () async {
-          if (_openActionServerId != null) {
-            setState(() => _openActionServerId = null);
-            return;
-          }
-          await ref.read(subscriptionProvider.notifier).selectServer(server);
-          ref
-              .read(selectedServerDisplayProvider.notifier)
-              .select(ServerDisplay.fromVpnServer(server));
-          if (mounted && Navigator.of(context).canPop()) {
-            Navigator.of(context).pop();
-          }
-        },
+        onTap: () => _handleServerTap(server),
         behavior: HitTestBehavior.opaque,
         child: _ServerCard(
           flag: server.flag,
-          title: _serverDisplayTitle(server),
+          title: _safeServerTitle(server),
           ping: _serverPings[server.url] ?? '...',
           isSelected: isSelected,
           isPinned: isPinned,
@@ -256,6 +259,31 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _handleServerTap(VpnServer server) async {
+    if (_openActionServerId != null) {
+      setState(() => _openActionServerId = null);
+      return;
+    }
+
+    await ref.read(subscriptionProvider.notifier).selectServer(server);
+    ref
+        .read(selectedServerDisplayProvider.notifier)
+        .select(ServerDisplay.fromVpnServer(server));
+
+    final vpnState = ref.read(vpnProvider);
+    final hasActiveSession =
+        vpnState.status == VpnStatus.connected ||
+        vpnState.status == VpnStatus.connecting ||
+        vpnState.status == VpnStatus.reconnecting;
+    if (hasActiveSession && vpnState.activeServer?.url != server.url) {
+      unawaited(ref.read(vpnProvider.notifier).switchServer(server));
+    }
+
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
   }
 
   void _ensureServerPings(List<VpnServer> servers) {
@@ -266,35 +294,25 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
         continue;
       }
       _pendingPingIds.add(pingId);
-      unawaited(_loadServerPing(server));
+      _enqueueServerPing(server, _pingGeneration);
     }
   }
 
-  Future<void> _loadServerPing(VpnServer server) async {
-    final ping = await _measureTcpPing(server);
-    if (!mounted) return;
+  void _enqueueServerPing(VpnServer server, int generation) {
+    final next = _pingQueue.then((_) => _loadServerPing(server, generation));
+    _pingQueue = next.catchError((_) {});
+    unawaited(_pingQueue);
+  }
+
+  Future<void> _loadServerPing(VpnServer server, int generation) async {
+    final ping = await ref
+        .read(vpnProvider.notifier)
+        .measureServerDelay(server);
+    if (!mounted || generation != _pingGeneration) return;
     setState(() {
       _pendingPingIds.remove(server.url);
-      _serverPings[server.url] = ping == null ? '--ms' : '${ping}ms';
+      _serverPings[server.url] = ping == null ? '—' : '${ping}ms';
     });
-  }
-
-  Future<int?> _measureTcpPing(VpnServer server) async {
-    Socket? socket;
-    final stopwatch = Stopwatch()..start();
-    try {
-      socket = await Socket.connect(
-        server.address,
-        server.port,
-        timeout: const Duration(milliseconds: 900),
-      );
-      stopwatch.stop();
-      return stopwatch.elapsedMilliseconds.clamp(1, 9999);
-    } catch (_) {
-      return null;
-    } finally {
-      socket?.destroy();
-    }
   }
 
   Future<void> _togglePinnedServer(VpnServer server) async {
@@ -329,6 +347,19 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
     return withoutNoise.isEmpty ? 'Обход глушилок' : withoutNoise;
   }
 
+  String _safeServerTitle(VpnServer server) {
+    final title = _serverDisplayTitle(server).trim();
+    if (title.isEmpty || _containsNetworkAddress(title)) return 'VPN сервер';
+    return title;
+  }
+
+  bool _containsNetworkAddress(String value) {
+    final text = value.toLowerCase();
+    if (RegExp(r'\b\d{1,3}(\.\d{1,3}){3}\b').hasMatch(text)) return true;
+    if (RegExp(r'\b[a-z0-9-]+(\.[a-z0-9-]+)+\b').hasMatch(text)) return true;
+    return false;
+  }
+
   Widget _buildServersLoadingCard() {
     return Container(
       height: 80,
@@ -350,7 +381,17 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
     );
   }
 
-  Widget _buildNoServersCard(bool trialExpired, String? error) {
+  Widget _buildNoServersCard({
+    required Subscription subscription,
+    required bool trialExpired,
+  }) {
+    final error = subscription.userFacingError;
+    final text =
+        error ??
+        (trialExpired
+            ? 'Пробный период истёк'
+            : 'Пробный сервер не получен от API');
+
     return Container(
       height: 80,
       padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -365,9 +406,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
           const SizedBox(width: 14),
           Expanded(
             child: Text(
-              trialExpired
-                  ? 'Пробный период истёк'
-                  : error ?? 'Пробный сервер не получен от API',
+              text,
               style: GoogleFonts.manrope(
                 fontSize: 15,
                 color: const Color(0xFF628499),
@@ -411,7 +450,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'Разблокируйте полный список\nсерверов с подпиской.',
+                  'Войдите, чтобы открыть полный\nсписок серверов.',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.manrope(
                     fontSize: 14,
@@ -432,7 +471,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
 
   Widget _buildSubscribeButton({required bool enabled}) {
     return GestureDetector(
-      onTap: enabled ? () => Navigator.of(context).pop() : null,
+      onTap: enabled ? () => openSubscriptionFlow(context, ref) : null,
       child: Container(
         clipBehavior: Clip.antiAlias,
         height: 60,
@@ -448,9 +487,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
                 borderRadius: BorderRadius.all(Radius.circular(16)),
               ),
             ),
-            Center(
-              child: Text('Оформить подписку', style: AppTextStyles.button),
-            ),
+            Center(child: Text('Авторизоваться', style: AppTextStyles.button)),
           ],
         ),
       ),
@@ -657,37 +694,60 @@ class _ServerCard extends StatelessWidget {
             ping,
             style: GoogleFonts.manrope(
               fontSize: 14,
-              color: const Color(0xFFD2EEFF),
+              color: _pingColor(ping),
               fontWeight: FontWeight.w600,
             ),
           ),
           const SizedBox(width: 8),
-          const _SignalBars(),
+          _SignalBars(ping: ping),
         ],
       ),
     );
   }
+
+  Color _pingColor(String ping) {
+    final ms = _parsePingMs(ping);
+    if (ms == null) return const Color(0xFF628499);
+    if (ms <= 300) return const Color(0xFF3EE875);
+    if (ms <= 650) return const Color(0xFFFFC247);
+    return const Color(0xFFFF7A00);
+  }
 }
 
 class _SignalBars extends StatelessWidget {
-  const _SignalBars();
+  final String ping;
+
+  const _SignalBars({required this.ping});
 
   @override
   Widget build(BuildContext context) {
+    final ms = _parsePingMs(ping);
+    final color = switch (ms) {
+      null => const Color(0xFF33425C),
+      <= 300 => const Color(0xFF3EE875),
+      <= 650 => const Color(0xFFFFC247),
+      _ => const Color(0xFFFF7A00),
+    };
+
     return SizedBox(
       width: 15,
       height: 18,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: const [
-          _SignalBar(height: 5, color: Color(0xFFFF7A00)),
-          _SignalBar(height: 9, color: Color(0xFFFF7A00)),
-          _SignalBar(height: 14, color: Color(0xFFFF7A00)),
+        children: [
+          _SignalBar(height: 5, color: color),
+          _SignalBar(height: 9, color: color),
+          _SignalBar(height: 14, color: color),
         ],
       ),
     );
   }
+}
+
+int? _parsePingMs(String ping) {
+  final match = RegExp(r'\d+').firstMatch(ping);
+  return match == null ? null : int.tryParse(match.group(0)!);
 }
 
 class _SignalBar extends StatelessWidget {
